@@ -18,7 +18,7 @@
 #include <sys/wait.h>
 #include <sys/types.h>
 #include <fcntl.h>
-#include <semaphore.h>
+#include <pthread.h>
 #include <errno.h>
 
 // Имя разделяемой памяти
@@ -41,9 +41,9 @@ typedef enum {
  * Структура разделяемой памяти ванной комнаты
  */
 typedef struct {
-    // Семафоры для синхронизации
-    sem_t mutex;              // Основной мьютекс для защиты данных
-    sem_t can_enter;          // Семафор для ожидания входа
+    // Синхронизация (с атрибутом PTHREAD_PROCESS_SHARED для межпроцессного использования)
+    pthread_mutex_t mutex;          // Мьютекс для защиты данных
+    pthread_cond_t  can_enter;      // Условная переменная для ожидания входа
     
     // Состояние ванной
     unsigned int total_cabins;      // Всего кабинок
@@ -59,7 +59,6 @@ typedef struct {
     // Счётчики ожидающих
     unsigned int waiting_males;
     unsigned int waiting_females;
-    unsigned int waiting_total;   // Общее число ожидающих (для семафора)
     
     // Статистика
     unsigned int entered_count;      // Сколько вошло
@@ -162,37 +161,30 @@ bool enterBathroom(int student_id, BathroomStatus gender, double* wait_time)
 {
     time_t wait_start = time(NULL);
     
-    sem_wait(&bathroom->mutex);
+    pthread_mutex_lock(&bathroom->mutex);
     
     if (!bathroom->simulation_running) {
-        sem_post(&bathroom->mutex);
+        pthread_mutex_unlock(&bathroom->mutex);
         return false;
     }
     
     // Увеличиваем счётчик ожидающих
     if (gender == MALE) bathroom->waiting_males++;
     else bathroom->waiting_females++;
-    bathroom->waiting_total++;
     
-    // Ожидаем возможности входа
+    // Ожидаем возможности входа (pthread_cond_wait автоматически освобождает и захватывает mutex)
     while (!isEntryAllowed(gender) && bathroom->simulation_running) {
-        sem_post(&bathroom->mutex);
-        
-        // Ждём сигнала
-        sem_wait(&bathroom->can_enter);
-        
-        sem_wait(&bathroom->mutex);
+        pthread_cond_wait(&bathroom->can_enter, &bathroom->mutex);
     }
     
     // Уменьшаем счётчик ожидающих
     if (gender == MALE) bathroom->waiting_males--;
     else bathroom->waiting_females--;
-    bathroom->waiting_total--;
     
     if (!bathroom->simulation_running) {
-        // Будим следующего в очереди
-        sem_post(&bathroom->can_enter);
-        sem_post(&bathroom->mutex);
+        // Будим всех ожидающих
+        pthread_cond_broadcast(&bathroom->can_enter);
+        pthread_mutex_unlock(&bathroom->mutex);
         return false;
     }
     
@@ -241,7 +233,7 @@ bool enterBathroom(int student_id, BathroomStatus gender, double* wait_time)
            bathroom->forced_switch_pending ? " | СМЕНА!" : "");
     fflush(stdout);
     
-    sem_post(&bathroom->mutex);
+    pthread_mutex_unlock(&bathroom->mutex);
     return true;
 }
 
@@ -250,7 +242,7 @@ bool enterBathroom(int student_id, BathroomStatus gender, double* wait_time)
  */
 void exitBathroom(int student_id, BathroomStatus gender)
 {
-    sem_wait(&bathroom->mutex);
+    pthread_mutex_lock(&bathroom->mutex);
     
     bathroom->occupied_cabins--;
     bathroom->last_gender = gender;
@@ -270,12 +262,10 @@ void exitBathroom(int student_id, BathroomStatus gender)
            bathroom->forced_switch_pending ? "ДА" : "нет");
     fflush(stdout);
     
-    // Будим ожидающих (несколько раз для надёжности)
-    for (unsigned int i = 0; i < bathroom->waiting_total + 1; i++) {
-        sem_post(&bathroom->can_enter);
-    }
+    // Будим ВСЕХ ожидающих (broadcast гарантирует, что никто не пропустит сигнал)
+    pthread_cond_broadcast(&bathroom->can_enter);
     
-    sem_post(&bathroom->mutex);
+    pthread_mutex_unlock(&bathroom->mutex);
 }
 
 /**
@@ -357,15 +347,25 @@ void runSimulation(
     // Инициализируем разделяемую память
     memset(bathroom, 0, sizeof(SharedBathroom));
     
-    // Инициализируем семафоры (pshared=1 для межпроцессного использования)
-    if (sem_init(&bathroom->mutex, 1, 1) == -1) {
-        perror("sem_init mutex");
+    // Инициализируем mutex с атрибутом PTHREAD_PROCESS_SHARED
+    pthread_mutexattr_t mutex_attr;
+    pthread_mutexattr_init(&mutex_attr);
+    pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED);
+    if (pthread_mutex_init(&bathroom->mutex, &mutex_attr) != 0) {
+        perror("pthread_mutex_init");
         exit(1);
     }
-    if (sem_init(&bathroom->can_enter, 1, 0) == -1) {
-        perror("sem_init can_enter");
+    pthread_mutexattr_destroy(&mutex_attr);
+    
+    // Инициализируем condition variable с атрибутом PTHREAD_PROCESS_SHARED
+    pthread_condattr_t cond_attr;
+    pthread_condattr_init(&cond_attr);
+    pthread_condattr_setpshared(&cond_attr, PTHREAD_PROCESS_SHARED);
+    if (pthread_cond_init(&bathroom->can_enter, &cond_attr) != 0) {
+        perror("pthread_cond_init");
         exit(1);
     }
+    pthread_condattr_destroy(&cond_attr);
     
     // Инициализируем состояние ванной
     bathroom->total_cabins = bathroom_capacity;
@@ -377,7 +377,6 @@ void runSimulation(
     bathroom->forced_switch_pending = false;
     bathroom->waiting_males = 0;
     bathroom->waiting_females = 0;
-    bathroom->waiting_total = 0;
     bathroom->entered_count = 0;
     bathroom->male_entered = 0;
     bathroom->female_entered = 0;
@@ -419,13 +418,18 @@ void runSimulation(
     sleep(simulation_time_sec);
     
     // Сигнализируем о завершении
-    sem_wait(&bathroom->mutex);
+    pthread_mutex_lock(&bathroom->mutex);
     bathroom->simulation_running = false;
-    sem_post(&bathroom->mutex);
+    // Будим ВСЕ ожидающие процессы
+    pthread_cond_broadcast(&bathroom->can_enter);
+    pthread_mutex_unlock(&bathroom->mutex);
     
-    // Будим все ожидающие процессы
-    for (int i = 0; i < student_count; i++) {
-        sem_post(&bathroom->can_enter);
+    // Дополнительно будим несколько раз для надёжности
+    for (int i = 0; i < 3; i++) {
+        usleep(100000);
+        pthread_mutex_lock(&bathroom->mutex);
+        pthread_cond_broadcast(&bathroom->can_enter);
+        pthread_mutex_unlock(&bathroom->mutex);
     }
     
     // Ждём завершения всех дочерних процессов
@@ -457,8 +461,8 @@ void runSimulation(
     
     // Очистка
     free(child_pids);
-    sem_destroy(&bathroom->mutex);
-    sem_destroy(&bathroom->can_enter);
+    pthread_mutex_destroy(&bathroom->mutex);
+    pthread_cond_destroy(&bathroom->can_enter);
     munmap(bathroom, sizeof(SharedBathroom));
     shm_unlink(SHM_NAME);
 }
