@@ -258,11 +258,32 @@ void* handleClient(void* arg) {
     int buffer[4];  // [команда, пол, client_id, доп.данные]
     int response[4];
     
-    while (server_running) {
+    // Статус соединения: 1 = подключено, 0 = отключено
+    int connection_status = 1;
+    
+    while (server_running && connection_status) {
         // Получаем команду от клиента
         int bytes = recv(client_socket, buffer, sizeof(buffer), 0);
-        if (bytes <= 0) {
-            break;  // Клиент отключился
+        
+        // Проверка статуса соединения
+        if (bytes == 0) {
+            // Клиент корректно закрыл соединение
+            printf("[СЕРВЕР] Клиент отключился (нормальное закрытие)\n");
+            fflush(stdout);
+            connection_status = 0;
+            break;
+        } else if (bytes < 0) {
+            // Ошибка при получении данных
+            perror("[СЕРВЕР] Ошибка recv");
+            connection_status = 0;
+            break;
+        }
+        
+        // Проверяем, что получили полный пакет
+        if (bytes < (int)sizeof(int)) {
+            printf("[СЕРВЕР] Получен неполный пакет (%d байт)\n", bytes);
+            fflush(stdout);
+            continue;
         }
         
         int cmd = buffer[0];
@@ -276,7 +297,11 @@ void* handleClient(void* arg) {
                 bool can = canEnter(gender);
                 pthread_mutex_unlock(&bathroom.mutex);
                 response[0] = can ? RESP_OK : RESP_DENIED;
-                send(client_socket, response, sizeof(int), 0);
+                
+                if (send(client_socket, response, sizeof(int), 0) < 0) {
+                    perror("[СЕРВЕР] Ошибка send (CHECK_ENTRY)");
+                    connection_status = 0;
+                }
                 break;
             }
             
@@ -284,7 +309,11 @@ void* handleClient(void* arg) {
                 // Вход (с блокировкой до освобождения места)
                 int result = enterBathroom(gender, client_id);
                 response[0] = result;
-                send(client_socket, response, sizeof(int), 0);
+                
+                if (send(client_socket, response, sizeof(int), 0) < 0) {
+                    perror("[СЕРВЕР] Ошибка send (ENTER)");
+                    connection_status = 0;
+                }
                 break;
             }
             
@@ -292,7 +321,11 @@ void* handleClient(void* arg) {
                 // Выход
                 exitBathroom(gender, client_id);
                 response[0] = RESP_OK;
-                send(client_socket, response, sizeof(int), 0);
+                
+                if (send(client_socket, response, sizeof(int), 0) < 0) {
+                    perror("[СЕРВЕР] Ошибка send (EXIT)");
+                    connection_status = 0;
+                }
                 break;
             }
             
@@ -303,10 +336,28 @@ void* handleClient(void* arg) {
                 response[0] = status;
                 response[1] = occupied;
                 response[2] = total;
-                send(client_socket, response, 3 * sizeof(int), 0);
+                
+                if (send(client_socket, response, 3 * sizeof(int), 0) < 0) {
+                    perror("[СЕРВЕР] Ошибка send (GET_STATUS)");
+                    connection_status = 0;
+                }
+                break;
+            }
+            
+            default: {
+                printf("[СЕРВЕР] Неизвестная команда: %d\n", cmd);
+                fflush(stdout);
+                response[0] = RESP_DENIED;
+                send(client_socket, response, sizeof(int), 0);
                 break;
             }
         }
+    }
+    
+    // Закрываем соединение
+    if (connection_status == 0) {
+        printf("[СЕРВЕР] Соединение закрыто\n");
+        fflush(stdout);
     }
     
     close(client_socket);
@@ -319,31 +370,55 @@ void* handleClient(void* arg) {
 void* acceptConnections(void* arg) {
     (void)arg;
     
+    printf("[СЕРВЕР] Поток приёма подключений запущен\n");
+    fflush(stdout);
+    
     while (server_running) {
         struct sockaddr_in client_addr;
         socklen_t addr_len = sizeof(client_addr);
         
+        // Ожидаем новое подключение
         int client_socket = accept(server_socket, (struct sockaddr*)&client_addr, &addr_len);
+        
+        // Проверка статуса accept
         if (client_socket < 0) {
             if (server_running) {
-                perror("accept");
+                perror("[СЕРВЕР] Ошибка accept");
             }
             continue;
         }
         
-        printf("[СЕРВЕР] Новое подключение от %s:%d\n",
+        // Успешное подключение
+        printf("[СЕРВЕР] [ПОДКЛЮЧЕНИЕ] Новый клиент от %s:%d (сокет: %d)\n",
                inet_ntoa(client_addr.sin_addr),
-               ntohs(client_addr.sin_port));
+               ntohs(client_addr.sin_port),
+               client_socket);
         fflush(stdout);
         
         // Создаём поток для обработки клиента
         int* socket_ptr = (int*)malloc(sizeof(int));
+        if (socket_ptr == NULL) {
+            perror("[СЕРВЕР] Ошибка malloc");
+            close(client_socket);
+            continue;
+        }
+        
         *socket_ptr = client_socket;
         
         pthread_t thread;
-        pthread_create(&thread, NULL, handleClient, socket_ptr);
+        int result = pthread_create(&thread, NULL, handleClient, socket_ptr);
+        if (result != 0) {
+            fprintf(stderr, "[СЕРВЕР] Ошибка создания потока: %d\n", result);
+            free(socket_ptr);
+            close(client_socket);
+            continue;
+        }
+        
         pthread_detach(thread);
     }
+    
+    printf("[СЕРВЕР] Поток приёма подключений завершён\n");
+    fflush(stdout);
     
     return NULL;
 }
