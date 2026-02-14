@@ -39,8 +39,7 @@ void openBathroom(Bathroom* b, unsigned int capacity, unsigned int max_entries) 
     b->last_gender = EMPTY;
 }
 
-
-void updateDoorStatus(Bathroom* b) {
+void printDoorStatus(Bathroom* b) {
     unsigned int free = b->total_cabins - b->occupied_cabins;
     const char* status = (b->current_status == EMPTY) ? "НИКОГО НЕТ" :
                          (b->current_status == MALE) ? "В ВАННОЙ МУЖЧИНЫ" : "В ВАННОЙ ЖЕНЩИНЫ";
@@ -61,8 +60,12 @@ bool enterBathroom(Bathroom* b, Student* s) {
         return false;
     }
     s->wait_start_time = (double)clock() / CLOCKS_PER_SEC;
-    while (!isEntryAllowed(b, s)) {
+    while (!isEntryAllowed(b, s) && bathroom_open) {
         pthread_cond_wait(&b->availability_signal, &b->access_lock);
+    }
+    if (!bathroom_open) {
+        pthread_mutex_unlock(&b->access_lock);
+        return false;
     }
     s->wait_end_time = (double)clock() / CLOCKS_PER_SEC;
     s->entered = true;
@@ -76,11 +79,13 @@ bool enterBathroom(Bathroom* b, Student* s) {
         b->forced_switch_pending = true;
     
     b->occupied_cabins++;
+    
     printf("[ВХОД] Студент %2d (%s) вошёл. Занято: %u/%u | Входы: %u/%u%s\n",
            s->student_id + 1, (s->gender == MALE) ? "M" : "F",
            b->occupied_cabins, b->total_cabins, b->consecutive_entries,
            b->max_consecutive_entries, b->forced_switch_pending ? " | СМЕНА!" : "");
-    updateDoorStatus(b);
+
+    printDoorStatus(b);
     pthread_mutex_unlock(&b->access_lock);
     return true;
 }
@@ -95,7 +100,7 @@ void exitBathroom(Bathroom* b, Student* s) {
     printf("[ВЫХОД] Студент %2d (%s) вышел. Занято: %u/%u\n",
            s->student_id + 1, (s->gender == MALE) ? "M" : "F",
            b->occupied_cabins, b->total_cabins);
-    updateDoorStatus(b);
+    printDoorStatus(b);
     pthread_cond_broadcast(&b->availability_signal);
     pthread_mutex_unlock(&b->access_lock);
 }
@@ -121,7 +126,7 @@ void bathroomDay(int student_count, double male_ratio, unsigned int capacity,
            student_count, male_ratio * 100, (1 - male_ratio) * 100, capacity, max_entries);
     
     openBathroom(&shared_bathroom, capacity, max_entries);
-    updateDoorStatus(&shared_bathroom);
+    printDoorStatus(&shared_bathroom);
     
     Student* students = malloc(student_count * sizeof(Student));
     pthread_t* threads = malloc(student_count * sizeof(pthread_t));
@@ -136,19 +141,11 @@ void bathroomDay(int student_count, double male_ratio, unsigned int capacity,
     }
     
     sleep((unsigned int)time_sec);
-    usleep(500000);
     bathroom_open = false;
     
     pthread_mutex_lock(&shared_bathroom.access_lock);
     pthread_cond_broadcast(&shared_bathroom.availability_signal);
     pthread_mutex_unlock(&shared_bathroom.access_lock);
-    
-    for (int i = 0; i < 10; i++) {
-        pthread_mutex_lock(&shared_bathroom.access_lock);
-        pthread_cond_broadcast(&shared_bathroom.availability_signal);
-        pthread_mutex_unlock(&shared_bathroom.access_lock);
-        usleep(200000);
-    }
     
     for (int i = 0; i < student_count; i++)
         pthread_join(threads[i], NULL);
@@ -170,7 +167,6 @@ void bathroomDay(int student_count, double male_ratio, unsigned int capacity,
     if (entered > 0)
         printf(" Среднее время ожидания: %.2f сек\n", total_wait / entered);
     printf("======================================================================\n\n");
-    fflush(stdout);
     
     free(students);
     free(threads);
