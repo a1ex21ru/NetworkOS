@@ -1,120 +1,13 @@
 Использование разделяемой памяти в ОС UNIX
 Задания к этой лабораторной работе такие же, как и в предыдущей. 
-Только на этот раз необходимо написать не многопоточную, а многопроцессную программу. 
-Отличие состоит в том, что вместо создания потока для каждой подзадачи создается 
-отдельный процесс (с помощью системного вызова fork). 
+Только на этот раз необходимо написать не многопоточную, 
+а многопроцессную программу. 
+Отличие состоит в том, что вместо создания потока 
+для каждой подзадачи создается отдельный процесс 
+(с помощью системного вызова fork). 
 Для того, чтобы процессы могли обмениваться информацией друг с другом, 
 необходимо использовать разделяемую память. 
 При этом необходимо синхронизировать доступ процессов к разделяемой памяти 
-с помощью семафоров или мьютексов. Семафоры или мьютексы должны быть или 
+с помощью семафоров или мьютексов. 
+Семафоры или мьютексы должны быть или 
 именованными или размещаемыми в разделяемой памяти.
-
-
-
-Пример выполнения (вариант 4).
-
-
-#include <cstdlib>
-#include <fcntl.h>
-#include <string.h>
-#include <sys/mman.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <pthread.h>
-#include <semaphore.h>
-#include <iostream>
-#include <cstdio>
-#include <atomic>
-
-
-using namespace std;
-#define CUSTOMER_COME_TIME 2
-#define CUT_MIN_TIME 5
-#define CUT_MAX_TIME 10
-#define sh_mem "hi"
-
-struct _Sem
-{
-    int waiting = 0, servicedCustomerCount = 0, customerCount;
-    int chairCount;
-    sem_t customers;
-    sem_t burber;
-    std::atomic_int _end;
-};
-
-_Sem* Sem;
-void ShowMessage(int threadId, char * person, char * msg){
-    cout << "Man " << threadId <<" "<< getpid() <<" (" << person << "): " << msg << endl;
-}
-
-
-
-int barber(void *)
-
-{
-  while (Sem->_end != -1)
-    {
-        sem_wait(&Sem->customers); //semaphore customers -1
-        Sem->waiting--;
-        sem_post(&Sem->burber); //semaphore burber +1
-        ShowMessage(0, (char *)"barber", (char *)"done");
-        Sem->servicedCustomerCount++;
-        sleep(Sem->cutTime); //блокировка процесса barber на заданное время
-    }
-    return NULL;
-}
-
-int customer(int Id)
-{
-    Sem->_end++;
-    if (Sem->waiting <= Sem->chairCount) /*если количество ожидающих меньше или равно
- количеству стульев*/
-    {
-        Sem->waiting++; //количество ждущих увеличилось
-        cout << "Waiting customers: " << Sem->waiting << endl;
-        ShowMessage(Id, (char *)"customer", (char *)"wait");
-        sem_post(&Sem->customers); //semaphore customers +1
-        sem_wait(&Sem->burber); //semaphore burbers -1
-    }
-    else
-    {
-        ShowMessage(Id, (char *)"customer", (char *)"go out"); } //иначе посетитель уходит   
-    Sem->_end--;
-    return NULL;
-}
-
-int main(int argc, char * argv[])
-{
-    shm_unlink(sh_mem);
-    int fd =  shm_open(sh_mem, O_RDWR | O_CREAT, 0777); 
-    shm_open(sh_mem);
-    Sem = (_Sem*)  mmap(0,sizeof(_Sem), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);  //отображение разделяемой памяти
-    ftruncate(fd, sizeof(_Sem*)); 
-
-    close(fd);
-    memset((void*)Sem, 0, sizeof(_Sem));/*обнуляем всю разделяемую память(каждой ячейке памяти присвоить 0))*/
-
-Sem->customerCount = atoi(argv[1]);//from string to int
-    cout << "Customer count: " << Sem->customerCount << endl;
-    Sem->chairCount = atoi(argv[2]);
-    cout << "Chair count: " << Sem->chairCount << endl;
-    cout << "Customer come time: " << CUSTOMER_COME_TIME << endl;
-    sem_init(&Sem->customers, 1, 0); //инициализация семафоров
-    sem_init(&Sem->burber, 1, 0);
-    if (fork()>0) return barber(0);//if fork =1 ->активировать процесс barber
-    for (int i = 0; i < Sem->customerCount; i++)
-    {
-        Sem->cutTime = rand() % (CUT_MAX_TIME - CUT_MIN_TIME) + CUT_MIN_TIME;
-        if (fork()>0) return customer(i+1); //время стрижки
-        sleep(CUSTOMER_COME_TIME);
-    }
-    do
-{
-        sleep(1);
-    }
-    while (Sem->_end);  
-    Sem->_end = -1;//парикмахер после того, как всех обслужил перестаёт работать
-    cout << "---------end-----------" << endl;
-    cout << "Serviced customers: " << Sem->servicedCustomerCount << endl;
-    return 0;
-}

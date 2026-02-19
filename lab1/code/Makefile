@@ -26,3 +26,6 @@ c3:
 
 c4:
 	$(CC) task.c -o $(TARGET) -lpthread && ./$(TARGET) 20 6 8
+
+st1:
+	$(CC) task_straight.c -o l lpthread && ./l 13 3 5

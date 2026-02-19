@@ -1,0 +1,513 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <time.h>
+#include <linux/time.h>
+
+#define COLOR_YELLOW "\033[33m"
+#define COLOR_GREEN "\033[32m"
+#define COLOR_RED   "\033[31m"
+#define COLOR_RESET "\033[0m"
+
+#define MAX_STREAK_FOR_STATE 5
+
+enum State {
+    nobody, 
+    man,  
+    woman,
+};
+typedef enum State Sex;
+
+typedef struct timespec Time;
+
+struct Bathroom
+{
+    pthread_mutex_t dataMutex;
+    pthread_cond_t cond;
+
+    pthread_mutex_t condMutex;
+
+    unsigned cabins_total;
+    unsigned cabins_used;
+    Sex state;
+    Sex last_state;
+
+    unsigned waiting_men;
+    unsigned waiting_women;
+
+    // сколько последовательно зашло человек одного пола
+    unsigned streak;
+    unsigned max_streak;
+
+    bool force_change;
+};
+typedef struct Bathroom Br;
+
+struct Student
+{
+    int studentID; 
+
+    enum State sex;
+    float timeForShower;
+
+    struct timespec arrival;
+    struct timespec enter;
+    struct timespec leave;
+};
+
+typedef struct Student St;
+
+const int BATHROOM_CAPACITY = 4;
+
+/// @brief Определение разницы времени между a и b
+/// @param a timespec
+/// @param b timespec
+/// @return diff
+double timespec_diff(Time a, Time b)
+{
+    return (b.tv_sec - a.tv_sec) + (b.tv_nsec - a.tv_nsec) / 1e9;
+}
+
+/// @brief Проверка доступности входа
+/// @param b ванная
+/// @param s студент
+/// @return 
+// bool canEnter(Br* b, St* s)
+// {
+//     // все кабинки заняты
+//     if (b->cabins_used == b->cabins_total) {
+//         return false;
+//     }
+
+//     // если пусто, можно всем
+//     if (b->state == nobody) {
+//         if (b->force_change && b->last_state == s->sex) {
+//             return false;  // запрет тому же полу после серии
+//         }
+//         return true;
+//     }
+    
+//     // разный пол вместе находится не может
+//     if (b->state != s->sex) {
+//         return false;
+//     }
+
+//     // Справедливый вход
+//     if (b->streak >= b->max_streak) {
+
+//         if (s->sex == man && b->waiting_women > 0)
+//             return false;
+
+//         if (s->sex == woman && b->waiting_men > 0)
+//             return false;
+//     }
+
+//     return true;
+// }
+
+/// @brief Вход в ванную
+/// @param b ванная
+/// @param s студент
+/// @return 
+// bool enterBathroom(Br *b, St *s)
+// {
+//     pthread_mutex_lock(&b->dataMutex);
+//     bool must_wait = !canEnter(b, s);
+//     // pthread_mutex_unlock(&b->dataMutex);
+    
+//     if (must_wait) {
+//         if (s->sex == man) b->waiting_men++;
+//         else b->waiting_women++;
+//     }
+
+//     // pthread_mutex_lock(&b->dataMutex);
+
+//     while (!canEnter(b,s)) {
+//         // ожидание cond_broadcast
+//         pthread_cond_wait(&b->cond, &b->dataMutex);
+//     }
+
+//     if (must_wait) {
+//         if (s->sex == man) b->waiting_men--;
+//         else b->waiting_women--;
+//     }
+
+//     if (b->state == nobody)
+//     {
+//         if (b->force_change && b->last_state != s->sex) {
+//             b->force_change = false;  // смена выполнена, сброс флага
+//             printf(COLOR_YELLOW"\t>>> СМЕНА ПОЛА ВЫПОЛНЕНА: Теперь в ванной %s <<<\n",
+//                    s->sex == man ? "мужчины" : "женщины");
+//         }
+//         b->state = s->sex;
+//         b->streak = 0;
+//     }
+
+//     b->cabins_used++;
+//     b->streak++;
+    
+//     printf(COLOR_GREEN"%4d. Студент (%-5s) in, время (%5.3f). Занято: %d/%d Серия: %d/%d \twait_m: %d wait_w: %d\n",
+//         s->studentID,
+//         s->sex == man ? "man":"woman",
+//         s->timeForShower,
+//         b->cabins_used, b->cabins_total,
+//         b->streak, b->max_streak,
+//         b->waiting_men, b->waiting_women
+//     );
+
+//     if (b->streak == b->max_streak) {
+//         printf(COLOR_YELLOW"\t>>> СМЕНА: Достигнута максимальная серия (%d) для %6s! <<<\n",
+//                b->max_streak,
+//                s->sex == man ? "мужчин" : "женщин");
+//     }
+    
+//     pthread_mutex_unlock(&b->dataMutex);
+
+//     return true;
+// }
+
+/// @brief Выход из ванной
+/// @param b ванная
+/// @param s студент
+// void leaveBathroom(Br* b, St* s)
+// {
+//     pthread_mutex_lock(&b->dataMutex);
+
+//     b->cabins_used--;
+
+//     if (b->cabins_used == 0)
+//     {
+//         if (b->streak >= b->max_streak) {
+//             b->last_state = b->state;  // запомнить пол
+//             b->force_change = true;     // требовать смену
+//         } else {
+//             b->force_change = false;  // обычный выход, смена не требуется
+//         }
+
+//         b->state = nobody;
+//         b->streak = 0;
+//     }
+
+//     // посылаем сигнал всем: место освободилось, кто сможет тот зайдет
+//     pthread_cond_broadcast(&b->cond);
+    
+//     printf(COLOR_RED"%4d. Student (%-5s) out. Занято: %d/%d\n",
+//         s->studentID,
+//         s->sex == man ? "man":"woman",
+//         b->cabins_used, b->cabins_total
+//     );
+
+//     pthread_mutex_unlock(&b->dataMutex);
+// }
+
+struct Bathroom b = {
+    .dataMutex = PTHREAD_MUTEX_INITIALIZER,
+    .condMutex = PTHREAD_MUTEX_INITIALIZER,
+    .cond = PTHREAD_COND_INITIALIZER,
+
+    .cabins_total = BATHROOM_CAPACITY,
+    .cabins_used = 0,
+    .state = nobody,
+    .last_state = nobody,
+    .force_change = false,
+
+    .waiting_men = 0,
+    .waiting_women = 0,
+    .streak = 0,
+    .max_streak = MAX_STREAK_FOR_STATE,
+
+};
+
+// void* studentThread (void* arg) {
+
+//     St* s = (St*)arg;
+
+//     clock_gettime(CLOCK_MONOTONIC, &s->arrival);
+//     if (enterBathroom(&b,s)) {
+
+//         clock_gettime(CLOCK_MONOTONIC, &s->enter);
+
+//         struct timespec ts;
+//         ts.tv_sec  = (time_t)s->timeForShower;
+//         ts.tv_nsec = (long)((s->timeForShower - ts.tv_sec) * 1e9);
+
+//         nanosleep(&ts, NULL);
+
+//         leaveBathroom(&b, s);
+//     }
+//     clock_gettime(CLOCK_MONOTONIC, &s->leave);
+
+//     return 0;
+// }
+
+/// @brief Функция потока студента
+/// @param arg 
+/// @return 
+void* studentThread (void* arg) {
+    St* s = (St*)arg;
+
+    clock_gettime(CLOCK_MONOTONIC, &s->arrival);
+
+    pthread_mutex_lock(&b.condMutex);
+    bool must_wait;
+
+    // Проверяем, нужно ли ждать 
+    // bool must_wait;
+    // // Проверка условия входа
+    // if (b.cabins_used == b.cabins_total) {
+    //     must_wait = true;
+    // } else if (b.state == nobody) {
+    //     if (b.force_change && b.last_state == s->sex)
+    //         must_wait = true;
+    //     else
+    //         must_wait = false;
+    // } else if (b.state != s->sex) {
+    //     must_wait = true;
+    // } else if (b.streak >= b.max_streak) {
+    //     if (s->sex == man && b.waiting_women > 0)
+    //         must_wait = true;
+    //     else if (s->sex == woman && b.waiting_men > 0)
+    //         must_wait = true;
+    //     else
+    //         must_wait = false;
+    // } else {
+    //     must_wait = false;
+    // }
+    // if (must_wait) {
+    //     if (s->sex == man)
+    //         b.waiting_men++;
+    //     else
+    //         b.waiting_women++;
+    // }
+
+    if (s->sex == man)
+        b.waiting_men++;
+    else
+        b.waiting_women++;
+
+    while (1) {
+
+        bool can_enter;
+
+        pthread_mutex_lock(&b.dataMutex);
+
+        if (b.cabins_used == b.cabins_total) {
+            can_enter = false;
+        } else if (b.state == nobody) {
+            if (b.force_change && b.last_state == s->sex)
+                can_enter = false;
+            else
+                can_enter = true;
+        } else if (b.state != s->sex) {
+            can_enter = false;
+        } else if (b.streak >= b.max_streak) {
+            if (s->sex == man && b.waiting_women > 0)
+                can_enter = false;
+            else if (s->sex == woman && b.waiting_men > 0)
+                can_enter = false;
+            else
+                can_enter = true;
+        } else {
+            can_enter = true;
+        }
+
+        pthread_mutex_unlock(&b.dataMutex);
+
+        if (can_enter)
+            break;
+
+
+        // Ждём сигнала
+        pthread_cond_wait(&b.cond, &b.condMutex);
+    }
+
+    // Теперь можно войти
+
+    if (s->sex == man)
+        b.waiting_men--;
+    else
+        b.waiting_women--;
+
+    // Обновляем состояние ванной при входе
+    if (b.state == nobody) {
+        if (b.force_change && b.last_state != s->sex) {
+            b.force_change = false;
+            printf(COLOR_YELLOW"\t>>> СМЕНА ПОЛА ВЫПОЛНЕНА: Теперь в ванной %s <<<\n",
+                   s->sex == man ? "мужчины" : "женщины");
+        }
+        b.state = s->sex;
+        b.streak = 0;
+    }
+
+    b.cabins_used++;
+    b.streak++;
+
+    // Запоминаем время входа (после фактического входа)
+    clock_gettime(CLOCK_MONOTONIC, &s->enter);
+
+    printf(COLOR_GREEN"%4d. Студент (%-5s) in, время (%5.3f). Занято: %d/%d Серия: %d/%d \twait_m: %d wait_w: %d\n",
+        s->studentID,
+        s->sex == man ? "man" : "woman",
+        s->timeForShower,
+        b.cabins_used, b.cabins_total,
+        b.streak, b.max_streak,
+        b.waiting_men, b.waiting_women
+    );
+
+    if (b.streak == b.max_streak) {
+        printf(COLOR_YELLOW"\t>>> СМЕНА: Достигнута максимальная серия (%d) для %6s! <<<\n",
+               b.max_streak,
+               s->sex == man ? "мужчин" : "женщин");
+    }
+    pthread_mutex_unlock(&b.condMutex);
+
+
+
+
+    // ---- Имитация принятия душа ----
+    struct timespec ts;
+    ts.tv_sec  = (time_t)s->timeForShower;
+    ts.tv_nsec = (long)((s->timeForShower - ts.tv_sec) * 1e9);
+    nanosleep(&ts, NULL);
+
+    // ---- Выход из ванной ----
+    pthread_mutex_lock(&b.condMutex);
+
+    pthread_mutex_lock(&b.dataMutex);
+    b.cabins_used--;
+
+    if (b.cabins_used == 0) {
+        if (b.streak >= b.max_streak) {
+            b.last_state = b.state;
+            b.force_change = true;
+        } else {
+            b.force_change = false;
+        }
+        b.state = nobody;
+        b.streak = 0;
+    }
+
+    printf(COLOR_RED"%4d. Student (%-5s) out. Занято: %d/%d\n",
+        s->studentID,
+        s->sex == man ? "man" : "woman",
+        b.cabins_used, b.cabins_total
+    );
+    
+    pthread_mutex_unlock(&b.dataMutex);
+    
+    // Будим всех ожидающих
+    pthread_cond_broadcast(&b.cond);
+
+    pthread_mutex_unlock(&b.condMutex);
+
+
+    clock_gettime(CLOCK_MONOTONIC, &s->leave);
+
+    return 0;
+}
+
+int initVarsFromCMD(int argc, char *argv[]);
+
+int random_number(int min_num, int max_num);
+
+//       8             4          5
+// students_count cabins_total streak
+int main(int argc, char *argv[]) {
+
+    srand((unsigned)time(NULL));
+
+    int studLen = initVarsFromCMD(argc, argv);
+    if (studLen == 0) {
+        studLen = random_number(9, 25);
+    }
+
+    St* students = (St*) malloc(studLen * sizeof(St));
+
+    int randTimeForShower;
+    for (int i = 0; i < studLen; i++) {
+        randTimeForShower = random_number(2, 5);
+        if (i % 2 == 0) {
+            students[i].sex = man;
+        } else {
+            students[i].sex = woman;
+        }
+
+        if (students[i].sex == woman) {
+            students[i].timeForShower = 2 * randTimeForShower;    
+        } else
+            students[i].timeForShower = randTimeForShower;
+
+        students[i].studentID = i + 1;
+    }
+
+    printf(COLOR_RESET"\tНачало: студентов - %d, кабинок - %d, максимальная серия - %d\n", studLen, b.cabins_total, b.max_streak);
+
+    pthread_t tid[studLen];
+
+    Time total_begin, total_end;
+
+    clock_gettime(CLOCK_MONOTONIC, &total_begin);
+    for (int i = 0; i < studLen; i++) {
+        // создание потока
+        pthread_create(&tid[i], NULL, studentThread, &students[i]);
+    }
+
+    for (int i = 0; i < studLen; i++) {
+        // ожидание потока
+        pthread_join(tid[i], NULL);
+    }
+    clock_gettime(CLOCK_MONOTONIC, &total_end);
+    printf(COLOR_RESET"\t=======================Завершение======================\n");
+
+    double total_wait = 0.0, utilization = 0.0, total_time = 0.0, total_shower = 0.0;
+
+    for (int i = 0; i < studLen; i++) {
+        double wait = timespec_diff(students[i].arrival, students[i].enter);
+        //printf("Время ожидания для студента %d = %f\n", students[i].studentID, wait);
+        total_wait += wait;
+        total_shower += timespec_diff(students[i].enter, students[i].leave);
+    }
+
+    total_time = timespec_diff(total_begin, total_end);
+
+    utilization = total_shower / (total_time * b.cabins_total) * 100;
+
+    double avg_wait = total_wait / studLen;
+    printf(COLOR_RESET"Среднее время ожидания: %f\n", avg_wait);
+
+    printf(COLOR_RESET"Утилизация: %.2f%%\n", utilization);
+
+    pthread_mutex_destroy(&b.dataMutex);
+    pthread_cond_destroy(&b.cond);
+
+    return 0;
+}
+
+int random_number(int min_num, int max_num) {
+    int result = 0;
+    
+    int range = max_num - min_num + 1;
+    
+    result = (rand() % range) + min_num;
+    return result;
+}
+
+int initVarsFromCMD(int argc, char *argv[])
+{
+    int studCounts = 0;
+    if (argc >= 2) {
+        studCounts = atoi(argv[1]);
+    }
+
+    if (argc >= 3) {
+        b.cabins_total = atoi(argv[2]);
+    }
+
+    if (argc >= 4) {
+        (&b)->max_streak = atoi(argv[3]);
+    }
+
+    return studCounts;
+}
