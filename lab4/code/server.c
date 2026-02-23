@@ -11,6 +11,7 @@
 #include <time.h>
 
 #define PORT        4567
+#define PORT_MAX    4587
 #define CMD_CHECK   1
 #define CMD_ENTER   2
 #define CMD_EXIT    3
@@ -171,11 +172,11 @@ static void* acceptor(void* arg) {
     return NULL;
 }
 
-int main(int argc, char* argv[]) {
+int main(void) {
     setbuf(stdout, 0);
-    int cabins = argc >= 2 ? atoi(argv[1]) : 3;
-    int maxc = argc >= 3 ? atoi(argv[2]) : 5;
-    const char* ip = argc >= 4 ? argv[3] : "0.0.0.0";
+    const int cabins = 3;
+    const int maxc = 5;
+    const char* ip = "0.0.0.0";
 
     pthread_mutex_init(&B.mtx, NULL);
     pthread_cond_init(&B.cond, NULL);
@@ -194,14 +195,19 @@ int main(int argc, char* argv[]) {
     memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
     sa.sin_addr.s_addr = inet_addr(ip);
-    sa.sin_port = htons(PORT);
-    if (bind(listen_fd, (struct sockaddr*)&sa, sizeof(sa)) < 0 ||
-        listen(listen_fd, 50) < 0) {
+    int port;
+    for (port = PORT; port <= PORT_MAX; port++) {
+        sa.sin_port = htons(port);
+        if (bind(listen_fd, (struct sockaddr*)&sa, sizeof(sa)) == 0 &&
+            listen(listen_fd, 50) == 0)
+            break;
+    }
+    if (port > PORT_MAX) {
         perror("bind/listen");
         close(listen_fd);
         return 1;
     }
-    printf("Сервер: %s:%d, кабинок %d, макс входов %d\n", ip, PORT, cabins, maxc);
+    printf("Сервер: %s:%d, кабинок %d, макс входов %d\n", ip, port, cabins, maxc);
     pthread_t t;
     pthread_create(&t, NULL, acceptor, NULL);
     pthread_join(t, NULL);

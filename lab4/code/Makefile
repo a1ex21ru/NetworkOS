@@ -32,5 +32,9 @@ run-male:
 run-female:
 	./client 127.0.0.1 2 F
 
-.PHONY: all clean run-server run-clients run-male run-female
+# Простой запуск: освободить порт, сервер в фоне, клиент
+run: all
+	@./run.sh
+
+.PHONY: all clean run run-server run-clients run-male run-female
 
