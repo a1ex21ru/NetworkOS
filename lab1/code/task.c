@@ -15,7 +15,8 @@ typedef struct {
 } Student;
 
 typedef struct {
-    pthread_mutex_t access_lock;
+    pthread_mutex_t access_lock; // Для защиты данных ванной
+    pthread_mutex_t wait_lock;   // Для синхронизации условной переменной
     pthread_cond_t availability_signal;
     unsigned int total_cabins, occupied_cabins;
     BathroomStatus current_status;
@@ -29,6 +30,7 @@ static volatile bool bathroom_open = true;
 
 void openBathroom(Bathroom* b, unsigned int capacity, unsigned int max_entries) {
     pthread_mutex_init(&b->access_lock, NULL);
+    pthread_mutex_init(&b->wait_lock, NULL);
     pthread_cond_init(&b->availability_signal, NULL);
     b->total_cabins = capacity;
     b->occupied_cabins = 0;
@@ -60,9 +62,15 @@ bool enterBathroom(Bathroom* b, Student* s) {
         return false;
     }
     s->wait_start_time = (double)clock() / CLOCKS_PER_SEC;
+    
+    pthread_mutex_lock(&b->wait_lock);
     while (!isEntryAllowed(b, s) && bathroom_open) {
-        pthread_cond_wait(&b->availability_signal, &b->access_lock);
+        pthread_mutex_unlock(&b->access_lock);
+        pthread_cond_wait(&b->availability_signal, &b->wait_lock);
+        pthread_mutex_lock(&b->access_lock);
     }
+    pthread_mutex_unlock(&b->wait_lock);
+    
     if (!bathroom_open) {
         pthread_mutex_unlock(&b->access_lock);
         return false;
@@ -87,6 +95,11 @@ bool enterBathroom(Bathroom* b, Student* s) {
 
     printDoorStatus(b);
     pthread_mutex_unlock(&b->access_lock);
+    
+    pthread_mutex_lock(&b->wait_lock);
+    pthread_cond_broadcast(&b->availability_signal);
+    pthread_mutex_unlock(&b->wait_lock);
+    
     return true;
 }
 
@@ -101,8 +114,11 @@ void exitBathroom(Bathroom* b, Student* s) {
            s->student_id + 1, (s->gender == MALE) ? "M" : "F",
            b->occupied_cabins, b->total_cabins);
     printDoorStatus(b);
-    pthread_cond_broadcast(&b->availability_signal);
     pthread_mutex_unlock(&b->access_lock);
+    
+    pthread_mutex_lock(&b->wait_lock);
+    pthread_cond_broadcast(&b->availability_signal);
+    pthread_mutex_unlock(&b->wait_lock);
 }
 
 void* studentRoutine(void* arg) {
@@ -115,7 +131,7 @@ void* studentRoutine(void* arg) {
 }
 
 void bathroomDay(int student_count, double male_ratio, unsigned int capacity,
-                 unsigned int max_entries, double time_sec) {
+                 unsigned int max_entries) {
     printf("\n======================================================================\n"
            " СИМУЛЯЦИЯ ВАННОЙ КОМНАТЫ\n"
            "======================================================================\n"
@@ -140,15 +156,13 @@ void bathroomDay(int student_count, double male_ratio, unsigned int capacity,
         pthread_create(&threads[i], NULL, studentRoutine, &students[i]);
     }
     
-    sleep((unsigned int)time_sec);
-    bathroom_open = false;
-    
-    pthread_mutex_lock(&shared_bathroom.access_lock);
-    pthread_cond_broadcast(&shared_bathroom.availability_signal);
-    pthread_mutex_unlock(&shared_bathroom.access_lock);
-    
     for (int i = 0; i < student_count; i++)
         pthread_join(threads[i], NULL);
+
+    bathroom_open = false;
+    pthread_mutex_lock(&shared_bathroom.wait_lock);
+    pthread_cond_broadcast(&shared_bathroom.availability_signal);
+    pthread_mutex_unlock(&shared_bathroom.wait_lock);
     
     double total_wait = 0.0;
     int entered = 0, male = 0, female = 0;
@@ -171,10 +185,11 @@ void bathroomDay(int student_count, double male_ratio, unsigned int capacity,
     free(students);
     free(threads);
     pthread_mutex_destroy(&shared_bathroom.access_lock);
+    pthread_mutex_destroy(&shared_bathroom.wait_lock);
     pthread_cond_destroy(&shared_bathroom.availability_signal);
 }
 
 int main(void) {
-    bathroomDay(20, 0.3, 3, 5, 20.0);
+    bathroomDay(20, 0.3, 3, 5);
     return 0;
 }

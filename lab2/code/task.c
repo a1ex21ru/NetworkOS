@@ -1,17 +1,3 @@
-/**
- * Лабораторная работа №2
- * Многопроцессная программа "Ванная комната в общежитии"
- * 
- * Использует:
- * - fork() для создания процессов-студентов
- * - shm_open() / mmap() для разделяемой памяти
- * - pthread_mutex_t (мьютекс) с атрибутом PTHREAD_PROCESS_SHARED
- * - pthread_cond_t (условная переменная) для синхронизации ожидания
- * 
- * Мьютекс и условная переменная размещены в разделяемой памяти,
- * что позволяет использовать их для межпроцессной синхронизации.
- */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -23,493 +9,227 @@
 #include <sys/types.h>
 #include <fcntl.h>
 #include <pthread.h>
-#include <errno.h>
 
-// Имя разделяемой памяти
 #define SHM_NAME "/bathroom_shm"
 
-// Константы времени (в микросекундах)
-#define MIN_SHOWER_TIME 1000000   // 1 секунда
-#define MAX_SHOWER_TIME 4000000   // 4 секунды
+typedef enum { EMPTY, MALE, FEMALE } BathroomStatus;
 
-/**
- * Статус ванной комнаты
- */
-typedef enum {
-    EMPTY,      // Ванная пуста
-    MALE,       // В ванной мужчины
-    FEMALE      // В ванной женщины
-} BathroomStatus;
-
-/**
- * Структура разделяемой памяти ванной комнаты
- */
 typedef struct {
-    // Синхронизация (с атрибутом PTHREAD_PROCESS_SHARED для межпроцессного использования)
-    pthread_mutex_t mutex;          // Мьютекс для защиты данных
-    pthread_cond_t  can_enter;      // Условная переменная для ожидания входа
-    
-    // Состояние ванной
-    unsigned int total_cabins;      // Всего кабинок
-    unsigned int occupied_cabins;   // Занятых кабинок
-    BathroomStatus current_status;  // Текущий статус (кто в ванной)
-    BathroomStatus last_gender;     // Пол последнего вышедшего
-    
-    // Механизм предотвращения голодания
-    unsigned int consecutive_entries;      // Последовательных входов одного пола
-    unsigned int max_consecutive_entries;  // Лимит входов
-    bool forced_switch_pending;            // Флаг принудительной смены
-    
-    // Счётчики ожидающих
-    unsigned int waiting_males;
-    unsigned int waiting_females;
-    
-    // Статистика
-    unsigned int entered_count;      // Сколько вошло
-    unsigned int male_entered;       // Мужчин вошло
-    unsigned int female_entered;     // Женщин вошло
-    double total_wait_time;          // Суммарное время ожидания
-    
-    // Флаг завершения симуляции
-    volatile bool simulation_running;
-    
-    // Время начала симуляции
+    pthread_mutex_t access_lock;
+    pthread_cond_t  availability_signal;
+    unsigned int total_cabins, occupied_cabins;
+    BathroomStatus current_status;
+    unsigned int consecutive_entries, max_consecutive_entries;
+    bool forced_switch_pending;
+    BathroomStatus last_gender;
+    volatile bool bathroom_open;
+    bool header_printed;
     time_t start_time;
-} SharedBathroom;
+    unsigned int entered_count, male_entered, female_entered;
+    double total_wait_time;
+} Bathroom;
 
-// Указатель на разделяемую память
-static SharedBathroom* bathroom = NULL;
+static Bathroom* shared_bathroom;
 
-/**
- * Вывод разделителя
- */
-void printSeparator(int count) {
-    for (int i = 0; i < count; i++) {
-        printf("=");
-    }
-    printf("\n");
+void openBathroom(Bathroom* b, unsigned int capacity, unsigned int max_entries) {
+    pthread_mutexattr_t mutex_attr;
+    pthread_mutexattr_init(&mutex_attr);
+    pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED);
+    pthread_mutex_init(&b->access_lock, &mutex_attr);
+    pthread_mutexattr_destroy(&mutex_attr);
+
+    pthread_condattr_t cond_attr;
+    pthread_condattr_init(&cond_attr);
+    pthread_condattr_setpshared(&cond_attr, PTHREAD_PROCESS_SHARED);
+    pthread_cond_init(&b->availability_signal, &cond_attr);
+    pthread_condattr_destroy(&cond_attr);
+
+    b->total_cabins = capacity;
+    b->occupied_cabins = 0;
+    b->current_status = EMPTY;
+    b->consecutive_entries = 0;
+    b->max_consecutive_entries = max_entries;
+    b->forced_switch_pending = false;
+    b->last_gender = EMPTY;
+    b->bathroom_open = true;
+    b->header_printed = false;
+    b->start_time = time(NULL);
+    b->entered_count = 0;
+    b->male_entered = 0;
+    b->female_entered = 0;
+    b->total_wait_time = 0.0;
 }
 
-/**
- * Получить текущее время в секундах от начала симуляции
- */
-int getElapsedTime(void) {
-    return (int)(time(NULL) - bathroom->start_time);
+void printDoorStatus(Bathroom* b) {
+    unsigned int free = b->total_cabins - b->occupied_cabins;
+    const char* status = (b->current_status == EMPTY) ? "НИКОГО НЕТ" :
+                         (b->current_status == MALE) ? "В ВАННОЙ МУЖЧИНЫ" : "В ВАННОЙ ЖЕНЩИНЫ";
+    printf("[ДВЕРЬ] Индикатор: %s | Свободных мест: %u из %u\n", status, free, b->total_cabins);
 }
 
-/**
- * Проверка возможности входа
- */
-static bool isEntryAllowed(BathroomStatus gender) 
-{
-    // 1. Все кабинки заняты
-    if (bathroom->occupied_cabins >= bathroom->total_cabins) {
-        return false;
-    }
-    
-    // 2. Ванная пуста — применяем механизм справедливости
-    if (bathroom->current_status == EMPTY) {
-        // Принудительная смена пола
-        if (bathroom->forced_switch_pending) {
-            if (gender == bathroom->last_gender) {
-                return false; // Тот же пол — не пускаем
-            }
-            return true; // Противоположный пол — пускаем
-        }
-        
-        // Оба пола ждут — приоритет большинству
-        if (bathroom->waiting_males > 0 && bathroom->waiting_females > 0) {
-            if (bathroom->waiting_females > bathroom->waiting_males) {
-                return (gender == FEMALE);
-            } else if (bathroom->waiting_males > bathroom->waiting_females) {
-                return (gender == MALE);
-            } else {
-                // Равное количество — чередуем
-                if (bathroom->last_gender == MALE) {
-                    return (gender == FEMALE);
-                } else if (bathroom->last_gender == FEMALE) {
-                    return (gender == MALE);
-                }
-                return true;
-            }
-        }
-        
-        // Только один пол ждёт — даём ему приоритет
-        if (gender == MALE && bathroom->waiting_females > 0) {
-            return false;
-        }
-        if (gender == FEMALE && bathroom->waiting_males > 0) {
-            return false;
-        }
-        
-        return true;
-    }
-    
-    // 3. Ванная занята — проверяем пол
-    if (bathroom->current_status == gender) {
-        // Тот же пол
-        if (bathroom->forced_switch_pending) {
-            return false; // Принудительная смена — блокируем
-        }
-        return true;
-    }
-    
-    // 4. Противоположный пол — вход запрещён
-    return false;
+static bool isEntryAllowed(Bathroom* b, BathroomStatus gender) {
+    if (b->occupied_cabins >= b->total_cabins) return false;
+    if (b->current_status == EMPTY)
+        return !(b->forced_switch_pending && b->last_gender != EMPTY && b->last_gender == gender);
+    return (b->current_status == gender) && !b->forced_switch_pending;
 }
 
-/**
- * Вход студента в ванную
- */
-bool enterBathroom(int student_id, BathroomStatus gender, double* wait_time)
-{
-    time_t wait_start = time(NULL);
-    
-    pthread_mutex_lock(&bathroom->mutex);
-    
-    if (!bathroom->simulation_running) {
-        pthread_mutex_unlock(&bathroom->mutex);
+bool enterBathroom(Bathroom* b, int student_id, BathroomStatus gender, double* wait_time) {
+    time_t t0 = time(NULL);
+    pthread_mutex_lock(&b->access_lock);
+    if (!b->bathroom_open) {
+        pthread_mutex_unlock(&b->access_lock);
         return false;
     }
-    
-    // Увеличиваем счётчик ожидающих
-    if (gender == MALE) bathroom->waiting_males++;
-    else bathroom->waiting_females++;
-    
-    // Ожидаем возможности входа (pthread_cond_wait автоматически освобождает и захватывает mutex)
-    while (!isEntryAllowed(gender) && bathroom->simulation_running) {
-        pthread_cond_wait(&bathroom->can_enter, &bathroom->mutex);
+    while (!isEntryAllowed(b, gender) && b->bathroom_open) {
+        pthread_cond_wait(&b->availability_signal, &b->access_lock);
     }
-    
-    // Уменьшаем счётчик ожидающих
-    if (gender == MALE) bathroom->waiting_males--;
-    else bathroom->waiting_females--;
-    
-    if (!bathroom->simulation_running) {
-        // Будим всех ожидающих
-        pthread_cond_broadcast(&bathroom->can_enter);
-        pthread_mutex_unlock(&bathroom->mutex);
+    if (!b->bathroom_open) {
+        pthread_cond_broadcast(&b->availability_signal);
+        pthread_mutex_unlock(&b->access_lock);
         return false;
     }
-    
-    // Вычисляем время ожидания
-    *wait_time = difftime(time(NULL), wait_start);
-    
-    // Обновляем состояние ванной
-    if (bathroom->current_status == EMPTY) {
-        if (gender != bathroom->last_gender || bathroom->last_gender == EMPTY) {
-            bathroom->consecutive_entries = 0;
-            bathroom->forced_switch_pending = false;
-        }
-        bathroom->current_status = gender;
+    *wait_time = difftime(time(NULL), t0);
+
+    if (b->current_status == EMPTY) {
+        b->consecutive_entries = 0;
+        if (b->last_gender != EMPTY && b->last_gender != gender) b->forced_switch_pending = false;
+        b->current_status = gender;
     }
-    
-    bathroom->consecutive_entries++;
-    bathroom->occupied_cabins++;
-    
-    // Проверяем лимит входов
-    bool opposite_waiting = (gender == MALE && bathroom->waiting_females > 0) ||
-                            (gender == FEMALE && bathroom->waiting_males > 0);
-    
-    if (bathroom->consecutive_entries >= bathroom->max_consecutive_entries && opposite_waiting) {
-        bathroom->forced_switch_pending = true;
-    }
-    
-    // Обновляем статистику
-    bathroom->entered_count++;
-    bathroom->total_wait_time += *wait_time;
-    if (gender == MALE) bathroom->male_entered++;
-    else bathroom->female_entered++;
-    
-    // Вывод
-    const char* gender_str = (gender == MALE) ? "M" : "F";
-    printf("[ВХОД %3d] Студент %2d (%s) [PID:%d] вошёл. Занято: %u/%u | Входы: %u/%u | Ожидают: M=%u F=%u%s\n",
-           getElapsedTime(),
-           student_id,
-           gender_str,
-           getpid(),
-           bathroom->occupied_cabins,
-           bathroom->total_cabins,
-           bathroom->consecutive_entries,
-           bathroom->max_consecutive_entries,
-           bathroom->waiting_males,
-           bathroom->waiting_females,
-           bathroom->forced_switch_pending ? " | СМЕНА!" : "");
-    fflush(stdout);
-    
-    pthread_mutex_unlock(&bathroom->mutex);
+    if (++b->consecutive_entries >= b->max_consecutive_entries)
+        b->forced_switch_pending = true;
+    b->occupied_cabins++;
+
+    b->entered_count++;
+    b->total_wait_time += *wait_time;
+    if (gender == MALE) b->male_entered++; else b->female_entered++;
+
+    printf("[ВХОД] Студент %2d (%s) вошёл. Занято: %u/%u | Входы: %u/%u%s\n",
+           student_id + 1, (gender == MALE) ? "M" : "F",
+           b->occupied_cabins, b->total_cabins, b->consecutive_entries,
+           b->max_consecutive_entries, b->forced_switch_pending ? " | СМЕНА!" : "");
+    printDoorStatus(b);
+    pthread_cond_broadcast(&b->availability_signal);
+    pthread_mutex_unlock(&b->access_lock);
     return true;
 }
 
-/**
- * Выход студента из ванной
- */
-void exitBathroom(int student_id, BathroomStatus gender)
-{
-    pthread_mutex_lock(&bathroom->mutex);
-    
-    bathroom->occupied_cabins--;
-    bathroom->last_gender = gender;
-    
-    if (bathroom->occupied_cabins == 0) {
-        bathroom->current_status = EMPTY;
+void exitBathroom(Bathroom* b, int student_id, BathroomStatus gender) {
+    pthread_mutex_lock(&b->access_lock);
+    b->occupied_cabins--;
+    if (b->occupied_cabins == 0) {
+        b->last_gender = b->current_status;
+        b->current_status = EMPTY;
+        b->forced_switch_pending = false;  /* когда ванная пуста — сбрасываем, иначе возможен дедлок */
     }
-    
-    const char* gender_str = (gender == MALE) ? "M" : "F";
-    printf("[ВЫХОД%3d] Студент %2d (%s) [PID:%d] вышел. Занято: %u/%u | Принуд.смена: %s\n",
-           getElapsedTime(),
-           student_id,
-           gender_str,
-           getpid(),
-           bathroom->occupied_cabins,
-           bathroom->total_cabins,
-           bathroom->forced_switch_pending ? "ДА" : "нет");
-    fflush(stdout);
-    
-    // Будим ВСЕХ ожидающих (broadcast гарантирует, что никто не пропустит сигнал)
-    pthread_cond_broadcast(&bathroom->can_enter);
-    
-    pthread_mutex_unlock(&bathroom->mutex);
+    printf("[ВЫХОД] Студент %2d (%s) вышел. Занято: %u/%u\n",
+           student_id + 1, (gender == MALE) ? "M" : "F",
+           b->occupied_cabins, b->total_cabins);
+    printDoorStatus(b);
+    pthread_cond_broadcast(&b->availability_signal);
+    pthread_mutex_unlock(&b->access_lock);
 }
 
-/**
- * Процесс студента
- */
-void studentProcess(int student_id, BathroomStatus gender, useconds_t shower_time)
-{
-    double wait_time = 0;
-    
-    // Пытаемся войти в ванную
-    if (enterBathroom(student_id, gender, &wait_time)) {
-        // Принимаем душ
-        usleep(shower_time);
-        
-        // Выходим из ванной
-        exitBathroom(student_id, gender);
+void studentRoutine(int student_id, BathroomStatus gender, double shower_duration) {
+    double wait_time = 0.0;
+    if (enterBathroom(shared_bathroom, student_id, gender, &wait_time)) {
+        usleep((useconds_t)(shower_duration * 1000000));
+        exitBathroom(shared_bathroom, student_id, gender);
     }
-    
-    // Завершаем дочерний процесс
     exit(0);
 }
 
-/**
- * Генерация случайного времени душа
- */
-useconds_t generateShowerTime(void) {
-    return MIN_SHOWER_TIME + (rand() % (MAX_SHOWER_TIME - MIN_SHOWER_TIME));
-}
-
-/**
- * Запуск симуляции
- */
-void runSimulation(
-    int student_count,
-    double male_ratio,
-    unsigned int bathroom_capacity,
-    unsigned int max_consecutive_entries,
-    int simulation_time_sec
-) {
-    printf("\n");
-    printSeparator(70);
-    printf(" СИМУЛЯЦИЯ ВАННОЙ КОМНАТЫ (многопроцессная версия)\n");
-    printSeparator(70);
-    printf(" Студентов: %d (мужчин: ~%.0f%%, женщин: ~%.0f%%)\n", 
-           student_count, male_ratio * 100, (1 - male_ratio) * 100);
-    printf(" Вместимость ванной: %u кабинок\n", bathroom_capacity);
-    printf(" Макс. последовательных входов: %u\n", max_consecutive_entries);
-    printf(" Время душа: случайно 1.0–4.0 сек\n");
-    printf(" Главный процесс PID: %d\n", getpid());
-    printSeparator(70);
-    printf("\n");
-    fflush(stdout);
-    
-    // Создаём/открываем разделяемую память
-    shm_unlink(SHM_NAME); // Удаляем старую, если есть
-    
+void bathroomDay(int student_count, double male_ratio, unsigned int capacity,
+                 unsigned int max_entries) {
+    shm_unlink(SHM_NAME);
     int fd = shm_open(SHM_NAME, O_RDWR | O_CREAT, 0666);
     if (fd == -1) {
         perror("shm_open");
         exit(1);
     }
-    
-    // Устанавливаем размер
-    if (ftruncate(fd, sizeof(SharedBathroom)) == -1) {
+    if (ftruncate(fd, sizeof(Bathroom)) == -1) {
         perror("ftruncate");
         exit(1);
     }
-    
-    // Отображаем в память
-    bathroom = (SharedBathroom*)mmap(NULL, sizeof(SharedBathroom),
-                                      PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (bathroom == MAP_FAILED) {
+    shared_bathroom = (Bathroom*)mmap(NULL, sizeof(Bathroom), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (shared_bathroom == MAP_FAILED) {
         perror("mmap");
         exit(1);
     }
-    
     close(fd);
-    
-    // Инициализируем разделяемую память
-    memset(bathroom, 0, sizeof(SharedBathroom));
-    
-    // Инициализируем mutex с атрибутом PTHREAD_PROCESS_SHARED
-    pthread_mutexattr_t mutex_attr;
-    pthread_mutexattr_init(&mutex_attr);
-    pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED);
-    if (pthread_mutex_init(&bathroom->mutex, &mutex_attr) != 0) {
-        perror("pthread_mutex_init");
+    memset(shared_bathroom, 0, sizeof(Bathroom));
+
+    openBathroom(shared_bathroom, capacity, max_entries);
+
+    pthread_mutex_lock(&shared_bathroom->access_lock);
+    if (!shared_bathroom->header_printed) {
+        printf("\n======================================================================\n"
+               " СИМУЛЯЦИЯ ВАННОЙ КОМНАТЫ\n"
+               "======================================================================\n"
+               " Студентов: %d (мужчин: ~%.0f%%, женщин: ~%.0f%%)\n"
+               " Вместимость ванной: %u кабинок | Макс. входов: %u\n"
+               " Время душа: случайно 1.0–4.0 сек\n"
+               "======================================================================\n\n",
+               student_count, male_ratio * 100, (1 - male_ratio) * 100, capacity, max_entries);
+        printDoorStatus(shared_bathroom);
+        shared_bathroom->header_printed = true;
+        fflush(stdout);
+    }
+    pthread_mutex_unlock(&shared_bathroom->access_lock);
+
+    srand((unsigned int)time(NULL));
+    pid_t* pids = malloc((size_t)student_count * sizeof(pid_t));
+    if (!pids) {
+        perror("malloc");
         exit(1);
     }
-    pthread_mutexattr_destroy(&mutex_attr);
-    
-    // Инициализируем condition variable с атрибутом PTHREAD_PROCESS_SHARED
-    pthread_condattr_t cond_attr;
-    pthread_condattr_init(&cond_attr);
-    pthread_condattr_setpshared(&cond_attr, PTHREAD_PROCESS_SHARED);
-    if (pthread_cond_init(&bathroom->can_enter, &cond_attr) != 0) {
-        perror("pthread_cond_init");
-        exit(1);
-    }
-    pthread_condattr_destroy(&cond_attr);
-    
-    // Инициализируем состояние ванной
-    bathroom->total_cabins = bathroom_capacity;
-    bathroom->occupied_cabins = 0;
-    bathroom->current_status = EMPTY;
-    bathroom->last_gender = EMPTY;
-    bathroom->consecutive_entries = 0;
-    bathroom->max_consecutive_entries = max_consecutive_entries;
-    bathroom->forced_switch_pending = false;
-    bathroom->waiting_males = 0;
-    bathroom->waiting_females = 0;
-    bathroom->entered_count = 0;
-    bathroom->male_entered = 0;
-    bathroom->female_entered = 0;
-    bathroom->total_wait_time = 0;
-    bathroom->simulation_running = true;
-    bathroom->start_time = time(NULL);
-    
-    // Массив PID дочерних процессов
-    pid_t* child_pids = (pid_t*)malloc(student_count * sizeof(pid_t));
-    
-    // Инициализируем генератор случайных чисел
-    srand((unsigned int)time(NULL) ^ getpid());
-    
-    // Создаём дочерние процессы для каждого студента
+
     for (int i = 0; i < student_count; i++) {
-        // Определяем пол студента
-        BathroomStatus gender = ((rand() / (double)RAND_MAX) < male_ratio) ? MALE : FEMALE;
-        useconds_t shower_time = generateShowerTime();
-        
+        BathroomStatus gender = (rand() / (double)RAND_MAX < male_ratio) ? MALE : FEMALE;
+        double shower_duration = 1.0 + (rand() / (double)RAND_MAX) * 3.0;
         pid_t pid = fork();
-        
         if (pid == -1) {
             perror("fork");
             exit(1);
         }
-        
         if (pid == 0) {
-            // Дочерний процесс
-            srand((unsigned int)time(NULL) ^ getpid()); // Пересеиваем генератор
-            studentProcess(i + 1, gender, shower_time);
-            // Сюда не дойдёт — studentProcess вызывает exit()
+            srand((unsigned int)time(NULL) ^ (unsigned int)getpid());
+            studentRoutine(i, gender, shower_duration);
         }
-        
-        // Родительский процесс
-        child_pids[i] = pid;
+        pids[i] = pid;
     }
-    
-    // Ждём завершения симуляции или таймаута
-    sleep(simulation_time_sec);
-    
-    // Сигнализируем о завершении
-    pthread_mutex_lock(&bathroom->mutex);
-    bathroom->simulation_running = false;
-    // Будим ВСЕ ожидающие процессы
-    pthread_cond_broadcast(&bathroom->can_enter);
-    pthread_mutex_unlock(&bathroom->mutex);
-    
-    // Дополнительно будим несколько раз для надёжности
-    for (int i = 0; i < 3; i++) {
-        usleep(100000);
-        pthread_mutex_lock(&bathroom->mutex);
-        pthread_cond_broadcast(&bathroom->can_enter);
-        pthread_mutex_unlock(&bathroom->mutex);
-    }
-    
-    // Ждём завершения всех дочерних процессов
-    for (int i = 0; i < student_count; i++) {
-        int status;
-        waitpid(child_pids[i], &status, 0);
-    }
-    
-    // Вывод результатов
-    printf("\n");
-    printSeparator(70);
+
+    for (int i = 0; i < student_count; i++)
+        waitpid(pids[i], NULL, 0);
+
+    pthread_mutex_lock(&shared_bathroom->access_lock);
+    shared_bathroom->bathroom_open = false;
+    pthread_cond_broadcast(&shared_bathroom->availability_signal);
+    pthread_mutex_unlock(&shared_bathroom->access_lock);
+
+    int entered = (int)shared_bathroom->entered_count;
+    int male = (int)shared_bathroom->male_entered;
+    int female = (int)shared_bathroom->female_entered;
+    double total_wait = shared_bathroom->total_wait_time;
+
+    printf("\n======================================================================\n");
     printf(" РЕЗУЛЬТАТЫ СИМУЛЯЦИИ\n");
-    printSeparator(70);
-    printf(" Успешно вошли: %u из %d студентов (%.1f%%)\n",
-           bathroom->entered_count, student_count,
-           (double)bathroom->entered_count / student_count * 100);
-    printf("   - Мужчины: %u\n", bathroom->male_entered);
-    printf("   - Женщины: %u\n", bathroom->female_entered);
-    
-    if (bathroom->entered_count > 0) {
-        printf(" Среднее время ожидания: %.2f сек\n",
-               bathroom->total_wait_time / bathroom->entered_count);
-    }
-    
-    printf(" Последовательных входов (макс.): %u\n", bathroom->max_consecutive_entries);
-    printSeparator(70);
-    printf("\n");
-    fflush(stdout);
-    
-    // Очистка
-    free(child_pids);
-    pthread_mutex_destroy(&bathroom->mutex);
-    pthread_cond_destroy(&bathroom->can_enter);
-    munmap(bathroom, sizeof(SharedBathroom));
+    printf("======================================================================\n");
+    printf(" Успешно вошли: %d из %d студентов (М: %d, Ж: %d)\n",
+           entered, student_count, male, female);
+    if (entered > 0)
+        printf(" Среднее время ожидания: %.2f сек\n", total_wait / entered);
+    printf("======================================================================\n\n");
+
+    free(pids);
+    pthread_mutex_destroy(&shared_bathroom->access_lock);
+    pthread_cond_destroy(&shared_bathroom->availability_signal);
+    munmap(shared_bathroom, sizeof(Bathroom));
     shm_unlink(SHM_NAME);
 }
 
-int main(int argc, char* argv[])
-{
-    // Отключаем буферизацию вывода
-    setbuf(stdout, 0);
-    
-    printf("╔══════════════════════════════════════════════════════════════════╗\n");
-    printf("║  ЛАБОРАТОРНАЯ РАБОТА №2                                          ║\n");
-    printf("║  Многопроцессная программа с разделяемой памятью                 ║\n");
-    printf("║  Задача: Ванная комната в общежитии                              ║\n");
-    printf("╚══════════════════════════════════════════════════════════════════╝\n");
-    
-    // Параметры по умолчанию или из командной строки
-    int student_count = 20;
-    int bathroom_capacity = 3;
-    
-    if (argc >= 3) {
-        student_count = atoi(argv[1]);
-        bathroom_capacity = atoi(argv[2]);
-        printf("\nПараметры из командной строки:\n");
-        printf("  Студентов: %d\n", student_count);
-        printf("  Вместимость: %d\n", bathroom_capacity);
-    }
-    
-    // Сценарий 1: Равное количество полов
-    runSimulation(student_count, 0.5, bathroom_capacity, 5, 25);
-    
-    // Сценарий 2: Преимущественно мужчины
-    runSimulation(25, 0.8, 4, 6, 40);
-    
-    // Сценарий 3: Преимущественно женщины
-    runSimulation(25, 0.2, 4, 6, 40);
-    
-    // Сценарий 4: Большая вместимость
-    runSimulation(30, 0.5, 6, 8, 45);
-    
-    printf("Все симуляции завершены.\n");
-    printf("Использованы: fork(), shm_open(), mmap(), pthread_mutex_t, pthread_cond_t\n");
-    printf("Синхронизация: мьютекс + условная переменная в разделяемой памяти (PTHREAD_PROCESS_SHARED)\n");
-    
+int main(void) {
+    setbuf(stdout, NULL);
+    bathroomDay(20, 0.3, 3, 5);
     return 0;
 }
-
