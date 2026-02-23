@@ -10,6 +10,7 @@
 #include <time.h>
 
 #define PORT       4567
+#define PORT_MAX   4587
 #define CMD_ENTER  2
 #define CMD_EXIT   3
 #define CMD_STATUS 4
@@ -19,6 +20,10 @@
 #define FEMALE     2
 #define SHOWER_MIN 1000000
 #define SHOWER_MAX 4000000
+#define SERVER_IP  "127.0.0.1"
+#define DEFAULT_MULTI 8
+#define N_CLIENTS  20
+#define MALE_RATIO 0.5
 
 static int sock = -1;
 
@@ -51,13 +56,17 @@ static int connect_server(const char* ip) {
     memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
     sa.sin_addr.s_addr = inet_addr(ip);
-    sa.sin_port = htons(PORT);
-    if (connect(sock, (struct sockaddr*)&sa, sizeof(sa)) < 0) {
-        perror("connect");
+    for (int p = PORT; p <= PORT_MAX; p++) {
+        sa.sin_port = htons(p);
+        if (connect(sock, (struct sockaddr*)&sa, sizeof(sa)) == 0)
+            return 0;
         close(sock);
-        return -1;
+        sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock < 0) { perror("socket"); return -1; }
     }
-    return 0;
+    perror("connect");
+    close(sock);
+    return -1;
 }
 
 static int req_enter(int g, int id) {
@@ -90,13 +99,32 @@ static void student_run(int id, int g, const char* ip) {
 
 int main(int argc, char* argv[]) {
     setbuf(stdout, 0);
+    const char* ip = SERVER_IP;
+    if (argc >= 2) ip = argv[1];
+
+    /* Без аргументов или только IP: запуск по умолчанию (несколько клиентов) */
     if (argc < 3) {
-        printf("Использование: %s <ip> <id> <M|F>   или   %s <ip> --multi <N> [%%мужчин]\n", argv[0], argv[0]);
-        return 1;
+        int n = DEFAULT_MULTI;
+        double ratio = 0.5;
+        if (argc == 2 && strcmp(argv[1], "--multi") == 0) ip = SERVER_IP;
+        srand((unsigned)time(NULL) ^ getpid());
+        pid_t* pids = malloc((size_t)n * sizeof(pid_t));
+        for (int i = 0; i < n; i++) {
+            int g = (rand() / (double)RAND_MAX < ratio) ? MALE : FEMALE;
+            if (fork() == 0) {
+                srand((unsigned)time(NULL) ^ getpid());
+                student_run(i + 1, g, ip);
+                exit(0);
+            }
+            usleep(50000);
+        }
+        for (int i = 0; i < n; i++) waitpid(pids[i], NULL, 0);
+        free(pids);
+        return 0;
     }
-    const char* ip = argv[1];
+
     if (strcmp(argv[2], "--multi") == 0) {
-        if (argc < 4) return 1;
+        if (argc < 4) { printf("Использование: %s [ip] --multi <N> [%%мужчин]\n", argv[0]); return 1; }
         int n = atoi(argv[3]);
         double ratio = argc >= 5 ? atoi(argv[4]) / 100.0 : 0.5;
         srand((unsigned)time(NULL) ^ getpid());
@@ -113,7 +141,7 @@ int main(int argc, char* argv[]) {
         for (int i = 0; i < n; i++) waitpid(pids[i], NULL, 0);
         free(pids);
     } else {
-        if (argc < 4) return 1;
+        if (argc < 4) { printf("Использование: %s [ip] <id> <M|F>\n", argv[0]); return 1; }
         int id = atoi(argv[2]);
         int g = (argv[3][0] == 'M' || argv[3][0] == 'm') ? MALE : FEMALE;
         student_run(id, g, ip);
