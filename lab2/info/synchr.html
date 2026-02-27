@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Процессы: разделяемая память, синхронизация, exec (dark theme)</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #1e1e2f;
+            color: #e0e0e0;
+        }
+        h1, h2, h3 {
+            color: #bb86fc;
+        }
+        h1 {
+            border-bottom: 3px solid #3700b3;
+            padding-bottom: 10px;
+        }
+        pre {
+            background: #2d2d3a;
+            color: #f8f8f2;
+            padding: 15px;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-family: 'Courier New', monospace;
+            border: 1px solid #444;
+        }
+        code {
+            background: #2d2d3a;
+            padding: 2px 5px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            color: #ffb86b;
+        }
+        .func-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.5);
+        }
+        .func-table th {
+            background: #3700b3;
+            border: 1px solid #2d2d3a;
+            color: white;
+            padding: 10px;
+            text-align: left;
+        }
+        .func-table td {
+            background: #2d2d3a;
+            padding: 10px;
+            border: 1px solid #444;
+        }
+        .func-table tr:hover td {
+            background: #3a3a4a;
+        }
+        .note {
+            background: #1e3a5f;
+            border-left: 6px solid #bb86fc;
+            padding: 12px 20px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        .warning {
+            background: #4a3b1e;
+            border-left: 6px solid #cf6679;
+            padding: 12px 20px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        .param-list {
+            list-style: none;
+            padding: 0;
+        }
+        .param-list li {
+            margin: 8px 0;
+            padding-left: 24px;
+            position: relative;
+        }
+        .param-list li:before {
+            content: "▹";
+            color: #bb86fc;
+            position: absolute;
+            left: 0;
+        }
+        hr {
+            border: 1px solid #444;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔧 Системные вызовы и функции для работы с процессами</h1>
+    <p>В версии программы, использующей <strong>процессы</strong> вместо потоков, необходимо:</p>
+    <ul>
+        <li>создавать отдельные процессы для каждого студента (<code>fork</code>);</li>
+        <li>организовать разделяемую память для общих структур (<code>mmap</code>);</li>
+        <li>синхронизировать доступ с помощью мьютексов и условных переменных, способных работать между процессами (<code>pthread_mutexattr_setpshared</code>);</li>
+        <li>ожидать завершения всех процессов (<code>waitpid</code>).</li>
+        <li>(опционально) заменить образ процесса новой программой (<code>exec</code>), если требуется.</li>
+    </ul>
+
+    <h2>1. Создание и управление процессами</h2>
+
+    <h3><code>fork()</code></h3>
+    <table class="func-table">
+        <tr><th>Прототип</th><td><code>pid_t fork(void);</code></td></tr>
+        <tr><th>Описание</th><td>Создаёт новый процесс (дочерний), который является почти полной копией родительского. Дочерний процесс получает собственное адресное пространство, но разделяемая память (отображённая с <code>MAP_SHARED</code>) остаётся общей.</td></tr>
+        <tr><th>Возвращаемое значение</th><td>
+            <ul>
+                <li>в родителе: PID дочернего процесса ( > 0 )</li>
+                <li>в потомке: 0</li>
+                <li>при ошибке: -1 (errno установлен)</li>
+            </ul>
+        </td></tr>
+    </table>
+
+    <h3><code>exit()</code></h3>
+    <table class="func-table">
+        <tr><th>Прототип</th><td><code>void exit(int status);</code></td></tr>
+        <tr><th>Описание</th><td>Завершает вызывающий процесс. Закрываются все файловые дескрипторы, освобождается память (кроме разделяемой, которая остаётся доступной другим процессам). Код возврата <code>status</code> может быть получен родителем через <code>waitpid</code>.</td></tr>
+    </table>
+
+    <h3><code>waitpid()</code></h3>
+    <table class="func-table">
+        <tr><th>Прототип</th><td><code>pid_t waitpid(pid_t pid, int *status, int options);</code></td></tr>
+        <tr><th>Параметры</th><td>
+            <ul class="param-list">
+                <li><code>pid</code> — идентификатор ожидаемого процесса. Если <code>pid = -1</code>, ожидается любой дочерний процесс.</li>
+                <li><code>status</code> — указатель на переменную, куда будет записан код завершения (можно <code>NULL</code>).</li>
+                <li><code>options</code> — флаги (например <code>WNOHANG</code> для неблокирующего режима). В задаче обычно 0 (блокировка).</li>
+            </ul>
+        </td></tr>
+        <tr><th>Описание</th><td>Приостанавливает выполнение родительского процесса до изменения состояния указанного дочернего процесса (завершение, остановка). Возвращает PID завершившегося процесса или -1 при ошибке.</td></tr>
+    </table>
+
+    <h2>2. Разделяемая память между процессами</h2>
+    <p>Для совместного использования структур <code>Bathroom</code> и массива <code>students</code> необходимо разместить их в разделяемой памяти, созданной с помощью <code>mmap</code>.</p>
+
+    <h3><code>mmap()</code></h3>
+    <table class="func-table">
+        <tr><th>Прототип</th><td><code>void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);</code></td></tr>
+        <tr><th>Параметры</th><td>
+            <ul class="param-list">
+                <li><code>addr</code> — желаемый адрес начала отображения. <code>NULL</code> означает, что ядро выберет адрес самостоятельно.</li>
+                <li><code>length</code> — размер отображаемой области в байтах (должен быть кратен размеру страницы, но ядро округляет).</li>
+                <li><code>prot</code> — права доступа: <code>PROT_READ</code> (чтение), <code>PROT_WRITE</code> (запись), можно комбинировать через <code>|</code>.</li>
+                <li><code>flags</code> — флаги отображения. Ключевые для задачи:
+                    <ul>
+                        <li><code>MAP_SHARED</code> — изменения видны всем процессам, отобразившим ту же область.</li>
+                        <li><code>MAP_ANON</code> (или <code>MAP_ANONYMOUS</code>) — анонимная память, не связанная с файлом.</li>
+                    </ul>
+                </li>
+                <li><code>fd</code> — файловый дескриптор. Для анонимной памяти указывается <code>-1</code>.</li>
+                <li><code>offset</code> — смещение в файле (для анонимной памяти должно быть 0).</li>
+            </ul>
+        </td></tr>
+        <tr><th>Возвращаемое значение</th><td>Указатель на начало отображённой области или <code>MAP_FAILED</code> (который равен <code>(void*)-1</code>) при ошибке.</td></tr>
+    </table>
+    <p>Пример создания разделяемой памяти под массив студентов:</p>
+    <pre>students = mmap(NULL, sizeof(St) * MAX_STUDENTS,
+                PROT_READ | PROT_WRITE,
+                MAP_SHARED | MAP_ANON,
+                -1, 0);</pre>
+    <p>Аналогично создаётся область для структуры ванной <code>Br *b</code>.</p>
+
+    <h3><code>munmap()</code></h3>
+    <table class="func-table">
+        <tr><th>Прототип</th><td><code>int munmap(void *addr, size_t length);</code></td></tr>
+        <tr><th>Описание</th><td>Удаляет отображение памяти для указанного диапазона адресов. После вызова обращаться к этой памяти нельзя. Возвращает 0 при успехе, -1 при ошибке.</td></tr>
+        <tr><th>Применение</th><td>В родительском процессе после завершения всех дочерних процессов:</td></tr>
+    </table>
+    <pre>munmap(b, sizeof(Br));
+munmap(students, sizeof(St) * MAX_STUDENTS);</pre>
+
+    <h2>3. Синхронизация между процессами</h2>
+    <p>Мьютексы и условные переменные POSIX (<code>pthread_mutex_t</code>, <code>pthread_cond_t</code>) могут использоваться между процессами только при выполнении двух условий:</p>
+    <ol>
+        <li>Они должны располагаться в разделяемой памяти (созданной через <code>mmap</code> с <code>MAP_SHARED</code>).</li>
+        <li>При инициализации необходимо указать атрибут <code>PTHREAD_PROCESS_SHARED</code>.</li>
+    </ol>
+
+    <h3>Настройка атрибутов мьютекса и условной переменной</h3>
+    <table class="func-table">
+        <tr><th>Функция</th><th>Назначение</th></tr>
+        <tr><td><code>pthread_mutexattr_init(&attr);</code></td><td>Инициализирует объект атрибутов мьютекса значениями по умолчанию.</td></tr>
+        <tr><td><code>pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);</code></td><td>Устанавливает атрибут «разделяемости между процессами».</td></tr>
+        <tr><td><code>pthread_condattr_init(&cattr);</code></td><td>Инициализирует объект атрибутов условной переменной.</td></tr>
+        <tr><td><code>pthread_condattr_setpshared(&cattr, PTHREAD_PROCESS_SHARED);</code></td><td>Аналогично для условной переменной.</td></tr>
+    </table>
+
+    <h3>Особенности реализации в программе</h3>
+    <p>В представленном коде используются <strong>два мьютекса</strong>:</p>
+    <ul>
+        <li><code>dataMutex</code> — защищает данные состояния ванной (количество занятых кабинок, текущий пол, счётчики ожидания и т.д.).</li>
+        <li><code>condMutex</code> — используется совместно с условной переменной <code>cond</code> для ожидания и сигнализации.</li>
+    </ul>
+    <p>Функция <code>canEnter()</code> захватывает <code>dataMutex</code>, проверяет возможность входа и отпускает его перед возвратом. Функции <code>enterBathroom</code> и <code>leaveBathroom</code> работают с <code>condMutex</code> и внутри себя могут дополнительно захватывать <code>dataMutex</code> (например, <code>leaveBathroom</code> захватывает <code>dataMutex</code> для обновления состояния).</p>
+    <p>Цикл ожидания в <code>enterBathroom</code> выглядит так:</p>
+    <pre>pthread_mutex_lock(&b->condMutex);
+while (!canEnter(b, s)) {
+    pthread_cond_wait(&b->cond, &b->condMutex);
+}</pre>
+    <p>При этом <code>canEnter</code> сама управляет <code>dataMutex</code>, поэтому после пробуждения проверка выполняется корректно. Такой подход возможен, но требует строгого соблюдения порядка блокировок во избежание взаимных блокировок. В <code>leaveBathroom</code> сначала захватывается <code>condMutex</code>, затем <code>dataMutex</code> — это гарантирует согласованность.</p>
+
+    <h2>4. Инициализация в функции <code>init()</code></h2>
+    <p>В коде вызывается <code>init()</code>, которая выполняет:</p>
+    <ul>
+        <li>создание разделяемой памяти для <code>Br *b</code> и <code>St *students</code> через <code>mmap</code>;</li>
+        <li>инициализацию двух мьютексов и условной переменной с атрибутом <code>PTHREAD_PROCESS_SHARED</code>;</li>
+        <li>установку начальных значений полей ванной.</li>
+    </ul>
+    <pre>void init() {
+    // Ванная в разделяемой памяти
+    b = mmap(NULL, sizeof(Br), PROT_READ|PROT_WRITE,
+             MAP_SHARED|MAP_ANON, -1, 0);
+
+    // Студенты в разделяемой памяти
+    students = mmap(NULL, sizeof(St) * MAX_STUDENTS,
+                    PROT_READ|PROT_WRITE,
+                    MAP_SHARED|MAP_ANON, -1, 0);
+
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+
+    pthread_condattr_t cattr;
+    pthread_condattr_init(&cattr);
+    pthread_condattr_setpshared(&cattr, PTHREAD_PROCESS_SHARED);
+
+    pthread_mutex_init(&b->dataMutex, &attr);
+    pthread_mutex_init(&b->condMutex, &attr);
+    pthread_cond_init(&b->cond, &cattr);
+
+    // Начальные значения
+    b->cabins_total = BATHROOM_CAPACITY;
+    b->cabins_used = 0;
+    b->state = nobody;
+    b->last_state = nobody;
+    b->force_change = false;
+    b->waiting_men = 0;
+    b->waiting_women = 0;
+    b->streak = 0;
+    b->max_streak = MAX_STREAK_FOR_STATE;
+
+    pthread_mutexattr_destroy(&attr);
+    pthread_condattr_destroy(&cattr);
+}</pre>
+
+    <h2>5. Вспомогательные функции</h2>
+
+    <h3><code>getpid()</code></h3>
+    <table class="func-table">
+        <tr><th>Прототип</th><td><code>pid_t getpid(void);</code></td></tr>
+        <tr><th>Описание</th><td>Возвращает идентификатор текущего процесса. Используется в программе для вывода PID студента в момент входа в ванную, что помогает отслеживать активность разных процессов.</td></tr>
+    </table>
+
+    <h3><code>nanosleep()</code></h3>
+    <table class="func-table">
+        <tr><th>Прототип</th><td><code>int nanosleep(const struct timespec *req, struct timespec *rem);</code></td></tr>
+        <tr><th>Описание</th><td>Приостанавливает выполнение текущего потока/процесса на заданное время. Используется для имитации времени пребывания студента в душе.</td></tr>
+    </table>
+
+    <h2>6. Запуск новых программ: семейство функций <code>exec</code></h2>
+    <p>Функции <code>exec</code> заменяют текущий образ процесса новой программой. В нашей задаче они не используются, потому что дочерние процессы продолжают выполнять ту же программу (функцию <code>studentProcess</code>). Однако в общем случае после <code>fork</code> часто вызывают <code>exec</code> для запуска другой программы.</p>
+
+    <h3>Общие свойства <code>exec</code></h3>
+    <ul>
+        <li>При успешном вызове <code>exec</code> не возвращает управление (образ процесса полностью заменён).</li>
+        <li>При ошибке возвращает <code>-1</code> и устанавливает <code>errno</code>.</li>
+        <li>Функции различаются способом передачи аргументов и поиска исполняемого файла.</li>
+    </ul>
+
+    <table class="func-table">
+        <tr><th>Функция</th><th>Прототип</th><th>Описание</th></tr>
+        <tr>
+            <td><code>execl</code></td>
+            <td><code>int execl(const char *path, const char *arg, ..., NULL);</code></td>
+            <td>Принимает список аргументов (как строки, оканчивающиеся NULL). Путь к программе задаётся полным или относительным путём.</td>
+        </tr>
+        <tr>
+            <td><code>execlp</code></td>
+            <td><code>int execlp(const char *file, const char *arg, ..., NULL);</code></td>
+            <td>Аналогична <code>execl</code>, но поиск программы осуществляется по переменной окружения <code>PATH</code> (как в shell).</td>
+        </tr>
+        <tr>
+            <td><code>execle</code></td>
+            <td><code>int execle(const char *path, const char *arg, ..., NULL, char *const envp[]);</code></td>
+            <td>Позволяет передать окружение для новой программы (массив строк <code>envp</code>).</td>
+        </tr>
+        <tr>
+            <td><code>execv</code></td>
+            <td><code>int execv(const char *path, char *const argv[]);</code></td>
+            <td>Аргументы передаются в виде массива строк, оканчивающегося NULL.</td>
+        </tr>
+        <tr>
+            <td><code>execvp</code></td>
+            <td><code>int execvp(const char *file, char *const argv[]);</code></td>
+            <td>Аналогична <code>execv</code>, но с поиском по <code>PATH</code>.</td>
+        </tr>
+        <tr>
+            <td><code>execvpe</code></td>
+            <td><code>int execvpe(const char *file, char *const argv[], char *const envp[]);</code></td>
+            <td>Расширение GNU: <code>execvp</code> + возможность передать окружение <code>envp</code>.</td>
+        </tr>
+    </table>
+
+    <p>Пример использования <code>execlp</code> для запуска программы <code>ls</code>:</p>
+    <pre>execlp("ls", "ls", "-l", NULL);</pre>
+    <p>Если бы в нашей задаче требовалось запустить отдельную программу для каждого студента, код мог бы выглядеть так:</p>
+    <pre>if (fork() == 0) {
+    execl("./student_proc", "student_proc", student_arg, NULL);
+    perror("exec"); // выполнится только при ошибке
+    exit(1);
+}</pre>
+
+    <div class="warning">
+        <strong>Примечание:</strong> в текущей реализации студенты моделируются функцией <code>studentProcess</code>, которая выполняется в том же бинарном файле. Вызов <code>exec</code> не требуется.
+    </div>
+
+    <h2>7. Очистка ресурсов в родительском процессе</h2>
+    <p>После завершения всех дочерних процессов родитель обязан:</p>
+    <ul>
+        <li>уничтожить мьютексы и условные переменные (<code>pthread_mutex_destroy</code>, <code>pthread_cond_destroy</code>);</li>
+        <li>освободить разделяемую память (<code>munmap</code>).</li>
+    </ul>
+    <pre>pthread_mutex_destroy(&b->dataMutex);
+pthread_mutex_destroy(&b->condMutex);
+pthread_cond_destroy(&b->cond);
+munmap(b, sizeof(Br));
+munmap(students, sizeof(St) * MAX_STUDENTS);</pre>
+
+    <hr>
+    <p><em>Документ содержит подробное описание всех функций, необходимых для реализации многопроцессной версии программы «Ванная комната».</em></p>
+</body>
+</html>
