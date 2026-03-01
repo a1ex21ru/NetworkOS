@@ -328,7 +328,7 @@ int main(int argc, char *argv[]) {
 
     double avg_wait = total_wait / studLen;
     printf(COLOR_RESET"Среднее время ожидания: %f\n", avg_wait);
-
+    printf(COLOR_RESET"Общее время работы программы %f\n", total_time);
     printf(COLOR_RESET"Утилизация: %.2f%%\n", utilization);
 
     pthread_mutex_destroy(&b.dataMutex);

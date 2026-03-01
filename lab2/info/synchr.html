@@ -86,6 +86,24 @@
             position: absolute;
             left: 0;
         }
+        .question-item {
+            background: #2d2d3a;
+            border-left: 6px solid #bb86fc;
+            margin: 20px 0;
+            padding: 12px 20px;
+            border-radius: 8px;
+        }
+        .question {
+            color: #bb86fc;
+            font-size: 1.1em;
+            margin-bottom: 8px;
+        }
+        .answer {
+            color: #e0e0e0;
+        }
+        .answer ul {
+            margin: 5px 0 0 20px;
+        }
         hr {
             border: 1px solid #444;
         }
@@ -331,6 +349,42 @@ pthread_mutex_destroy(&b->condMutex);
 pthread_cond_destroy(&b->cond);
 munmap(b, sizeof(Br));
 munmap(students, sizeof(St) * MAX_STUDENTS);</pre>
+
+    <hr>
+
+    <h2>Вопросы по защите</h2>
+
+    <div class="question-item">
+        <div class="question"><strong>1. С какого места начнётся выполнение дочернего и продолжится выполнение родительского процесса после вызова fork?</strong></div>
+        <div class="answer">Ответ: с команды pop, которая извлечет значение pid из стека (или с другой команды, которая выполнится сразу после завершения работы fork(), в зависимости от кода).</div>
+    </div>
+
+    <div class="question-item">
+        <div class="question"><strong>2. Аргументы используемых функций (mmap, shm_open и любых других).</strong></div>
+        <div class="answer">Ответ: В программе используются:
+            <ul>
+                <li><code>mmap(addr, length, prot, flags, fd, offset)</code> — отображение файла или анонимной памяти. Подробно параметры описаны в разделе 2.</li>
+                <li><code>shm_open(name, oflag, mode)</code> — создаёт или открывает объект разделяемой памяти POSIX (не использован, но упомянут).</li>
+                <li><code>fork()</code> — без аргументов.</li>
+                <li><code>waitpid(pid, status, options)</code> — ожидание завершения процесса.</li>
+                <li><code>pthread_mutexattr_init, pthread_mutexattr_setpshared, pthread_mutex_init</code> — работа с атрибутами мьютекса.</li>
+                <li><code>pthread_condattr_init, pthread_condattr_setpshared, pthread_cond_init</code> — атрибуты условной переменной.</li>
+                <li><code>munmap(addr, length)</code> — удаление отображения.</li>
+                <li><code>nanosleep(req, rem)</code> — высокоточная задержка.</li>
+                <li><code>clock_gettime(clk_id, tp)</code> — получение времени.</li>
+            </ul>
+        </div>
+    </div>
+
+    <div class="question-item">
+        <div class="question"><strong>3. Что такое отображение объекта разделяемой памяти, как это устроено на уровне ОС и почему это быстро?</strong></div>
+        <div class="answer">Ответ: Отображение разделяемой памяти (shared memory mapping) — это механизм, при котором одна и та же область физической памяти отображается в адресные пространства нескольких процессов. На уровне ОС ядро создаёт запись в таблице страниц каждого процесса, указывающую на одни и те же физические страницы. Это быстро, потому что при доступе к данным не требуется копирование (как при передаче сообщений) или системные вызовы; процессы читают и пишут напрямую в физическую память. Синхронизация остаётся задачей прикладного программиста.</div>
+    </div>
+
+    <div class="question-item">
+        <div class="question"><strong>4. Что будет, если объявить сначала статический мьютекс с идентификатором N (в глобальной области), заблокировать его, а затем переопределить этот же мьютекс динамически и заблокировать его снова?</strong></div>
+        <div class="answer">Ответ: Старый мьютекс станет недоступен ни одному процессу/потоку, а новый будет работать нормально. Переопределение мьютекса (например, повторная инициализация) без предварительного уничтожения приводит к неопределённому поведению. Обычно ресурсы, связанные со старым мьютексом, теряются, и попытка использовать его может вызвать ошибку или взаимоблокировку.</div>
+    </div>
 
     <hr>
     <p><em>Документ содержит подробное описание всех функций, необходимых для реализации многопроцессной версии программы «Ванная комната».</em></p>

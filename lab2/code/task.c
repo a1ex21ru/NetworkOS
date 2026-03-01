@@ -17,16 +17,13 @@
 #define COLOR_RED   "\033[31m"
 #define COLOR_RESET "\033[0m"
 
-enum State {
-    nobody, 
-    man,  
+typedef enum {
+    nobody,
+    man,
     woman,
-};
+} Sex;
 
-typedef enum State Sex;
-
-typedef struct 
-{
+typedef struct {
     pthread_mutex_t dataMutex;
     pthread_cond_t cond;
 
@@ -46,19 +43,20 @@ typedef struct
     unsigned max_streak;
 } Br;
 
+typedef struct timespec Time;
+
 typedef struct
 {
-    int studentID; 
+    int studentID;
 
     Sex sex;
     float timeForShower;
 
-    struct timespec arrival;
-    struct timespec enter;
-    struct timespec leave;
+    Time arrival;
+    Time enter;
+    Time leave;
 } St;
 
-typedef struct timespec Time;
 
 /// @brief Опредение глобальной душевой
 Br* b;
@@ -71,14 +69,13 @@ St* students;
 /// @return diff
 double timespec_diff(Time a, Time b)
 {
-    return (b.tv_sec - a.tv_sec) +
-           (b.tv_nsec - a.tv_nsec) / 1e9;
+    return (b.tv_sec - a.tv_sec) +  (b.tv_nsec - a.tv_nsec) / 1e9;
 }
 
 /// @brief Проверка доступности входа
 /// @param b ванная
 /// @param s студент
-/// @return 
+/// @return
 bool canEnter(Br* b, St* s)
 {
     pthread_mutex_lock(&b->dataMutex);
@@ -89,16 +86,21 @@ bool canEnter(Br* b, St* s)
         return false;
     }
 
-    // если пусто, можно всем
     if (b->state == nobody) {
         if (b->force_change && b->last_state == s->sex) {
-            pthread_mutex_unlock(&b->dataMutex);
-            return false;  // запрет тому же полу после серии
+            // Если есть ожидающие противоположного пола – ждём, иначе пускаем
+            if ((s->sex == man && b->waiting_women > 0) ||
+                (s->sex == woman && b->waiting_men > 0)) {
+                    pthread_mutex_unlock(&b->dataMutex);
+                    return false;  // запрет тому же полу после серии
+            }
+            // Иначе сбрасываем force_change и пускаем
+            b->force_change = false;
         }
         pthread_mutex_unlock(&b->dataMutex);
         return true;
     }
-    
+
     // разный пол вместе находится не может
     if (b->state != s->sex) {
         pthread_mutex_unlock(&b->dataMutex);
@@ -126,9 +128,9 @@ bool canEnter(Br* b, St* s)
 }
 
 /// @brief Вход в ванную
-/// @param b ванная 
+/// @param b ванная
 /// @param s студент
-/// @return 
+/// @return
 bool enterBathroom(Br *b, St *s)
 {
     pthread_mutex_lock(&b->condMutex);
@@ -163,7 +165,7 @@ bool enterBathroom(Br *b, St *s)
 
     b->cabins_used++;
     b->streak++;
-    
+
     printf(COLOR_GREEN"%4d. Студент (%-5s) [PID %d] in, время %5.3f. Занято: %d/%d streak: %d/%d \twait_m: %d wait_w: %d\n",
         s->studentID,
         s->sex == man ? "man":"woman",
@@ -179,7 +181,7 @@ bool enterBathroom(Br *b, St *s)
                b->max_streak,
                s->sex == man ? "мужчин" : "женщин");
     }
-    
+
     pthread_mutex_unlock(&b->condMutex);
 
     return true;
@@ -188,34 +190,34 @@ bool enterBathroom(Br *b, St *s)
 /// @brief Выход из ванной
 /// @param b ванная
 /// @param s студент
-void leaveBathroom(Br* b, St* s) 
+void leaveBathroom(Br* b, St* s)
 {
     pthread_mutex_lock(&b->condMutex);
 
-    pthread_mutex_lock(&b->dataMutex);
+        pthread_mutex_lock(&b->dataMutex);
 
-    b->cabins_used--;
+        b->cabins_used--;
 
-    if (b->cabins_used == 0)
-    {
-        if (b->streak >= b->max_streak) {
-            b->last_state = b->state;  // запомнить пол
-            b->force_change = true;     // требовать смену
-        } else {
-            b->force_change = false;  // обычный выход, смена не требуется
+        if (b->cabins_used == 0)
+        {
+            if (b->streak >= b->max_streak) {
+                b->last_state = b->state;  // запомнить пол
+                b->force_change = true;     // требовать смену
+            } else {
+                b->force_change = false;  // обычный выход, смена не требуется
+            }
+
+            b->state = nobody;
+            b->streak = 0;
         }
 
-        b->state = nobody;
-        b->streak = 0;
-    }
-    
-    printf(COLOR_RED"%4d. Студент (%-5s) out. Занято: %d/%d\n",
-        s->studentID,
-        s->sex == man ? "man":"woman",
-        b->cabins_used, b->cabins_total
-    );
+        printf(COLOR_RED"%4d. Студент (%-5s) out. Занято: %d/%d\n",
+            s->studentID,
+            s->sex == man ? "man":"woman",
+            b->cabins_used, b->cabins_total
+        );
 
-    pthread_mutex_unlock(&b->dataMutex);
+        pthread_mutex_unlock(&b->dataMutex);
 
     // посылаем сигнал всем: место освободилось, кто сможет тот зайдет
     pthread_cond_broadcast(&b->cond);
@@ -223,9 +225,9 @@ void leaveBathroom(Br* b, St* s)
     pthread_mutex_unlock(&b->condMutex);
 }
 
-/// @brief Функция процесса студента
-/// @param arg 
-/// @return 
+/// @brief Функция процесса студента 
+/// @param arg
+/// @return
 void studentProcess (St* s) {
 
     clock_gettime(CLOCK_MONOTONIC, &s->arrival);
@@ -240,10 +242,8 @@ void studentProcess (St* s) {
     nanosleep(&ts, NULL);
 
     leaveBathroom(b, s);
-    
-    clock_gettime(CLOCK_MONOTONIC, &s->leave);
 
-    exit(0);
+    clock_gettime(CLOCK_MONOTONIC, &s->leave);
 }
 
 void init();
@@ -254,10 +254,10 @@ int initVarsFromCMD(int argc, char *argv[]);
 
 int main(int argc, char* argv[]){
     srand((unsigned)time(NULL));
-    
+
     init();
 
-    int studLen = 0;
+    int studLen, m = 0;
     studLen = initVarsFromCMD(argc, argv);
 
     if (studLen == 0) {
@@ -270,16 +270,19 @@ int main(int argc, char* argv[]){
 
         // Случайный пол: 50/50
         students[i].sex = (rand() % 2 == 0) ? man : woman;
+        if (students[i].sex == man)
+            m++;
 
-        students[i].timeForShower = 
+        students[i].timeForShower =
             (students[i].sex == woman) ? 2 * rtime : rtime;
         students[i].studentID = i + 1;
     }
 
     printf(COLOR_RESET
-        "\tНачало: студентов - %d, кабинок - %d, " \
+        "\tНачало: студентов - %d, студентов - %d, студенток - %d, кабинок - %d, " \
         "максимальная серия - %d\n",
-        studLen, b->cabins_total, b->max_streak);
+        studLen, m, studLen - m,
+        b->cabins_total, b->max_streak);
 
     pid_t pids[MAX_STUDENTS];
     Time total_begin, total_end;
@@ -305,7 +308,7 @@ int main(int argc, char* argv[]){
     }
 
     clock_gettime(CLOCK_MONOTONIC, &total_end);
-    
+
     printf(COLOR_RESET
         "\t==============Завершение==============\n");
 
@@ -313,8 +316,8 @@ int main(int argc, char* argv[]){
     for (int i = 0; i < studLen; i++) {
         double wait = timespec_diff(
             students[i].arrival, students[i].enter);
-        printf("Время ожидания студента %d = %f\n",
-               students[i].studentID, wait);
+        //printf("Время ожидания студента %d = %f\n",
+            //    students[i].studentID, wait);
         total_wait += wait;
         total_shower += timespec_diff(
             students[i].enter, students[i].leave);
@@ -336,20 +339,18 @@ int main(int argc, char* argv[]){
     munmap(students, sizeof(St) * MAX_STUDENTS);
 
     return 0;
-
 }
 
 void init() {
     // Ванная в разделяемой памяти
-    b = mmap(NULL, sizeof(Br), 
-        PROT_READ | PROT_WRITE, 
-        MAP_SHARED | MAP_ANON, 
-        -1, 0);
+    b = mmap(NULL, sizeof(Br),
+        PROT_READ | PROT_WRITE,
+        MAP_SHARED | MAP_ANON, -1, 0);
 
     // Студенты в разделяемой памяти
     students = mmap(NULL, sizeof(St) * MAX_STUDENTS,
                     PROT_READ | PROT_WRITE,
-                    MAP_SHARED | MAP_ANONYMOUS, 
+                    MAP_SHARED | MAP_ANON,
                     -1, 0);
 
     pthread_mutexattr_t attr;
@@ -360,32 +361,32 @@ void init() {
     pthread_condattr_t cattr;
     pthread_condattr_init(&cattr);
     pthread_condattr_setpshared(&cattr, PTHREAD_PROCESS_SHARED);
-    
+
     pthread_mutex_init(&b->dataMutex, &attr);
     pthread_mutex_init(&b->condMutex, &attr);
     pthread_cond_init(&b->cond, &cattr);
-    
+
     b->cabins_total = BATHROOM_CAPACITY;
-    
+
     b->cabins_used = 0;
     b->state = nobody;
     b->last_state = nobody;
     b->last_state = false;
-    
+
     b->waiting_men = 0;
     b->waiting_women = 0;
     b->streak = 0;
     b->max_streak = MAX_STREAK_FOR_STATE;
-    
+
     pthread_mutexattr_destroy(&attr);
     pthread_condattr_destroy(&cattr);
 }
 
 int random_number(int min_num, int max_num) {
     int result = 0;
-    
+
     int range = max_num - min_num + 1;
-    
+
     result = (rand() % range) + min_num;
     return result;
 }

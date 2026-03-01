@@ -7,5 +7,15 @@
 			"path": "../../../lab"
 		}
 	],
-	"settings": {}
+	"settings": {
+		"makefile.makefilePath": "./lab1/code",
+		"makefile.launchConfigurations": [
+			{
+				"cwd": "/home/user/CHGU/NetworkOS",
+				"binaryPath": "/home/user/CHGU/NetworkOS/task.z",
+				"binaryArgs": []
+			}
+		],
+		"makefile.buildLog": "./lab1/code/log"
+	}
 }
