@@ -152,63 +152,60 @@ void broadcast_to_clients(const char* msg) {
     pthread_mutex_unlock(&clients_mutex);
 }
 
-// ============================================
-// ЛОГИКА МОДЕЛИ ВАННОЙ (из ЛР1)
-// ============================================
 
 // Проверка возможности входа в ванную
-_Bool canEnter(Br* b, St* s) {
-    pthread_mutex_lock(&b->dataMutex);
+bool canEnter(Br* b, St* s) {
+    // pthread_mutex_lock(&b->dataMutex);
 
     // Все кабинки заняты
     if (b->cabins_used == b->cabins_total) {
-        pthread_mutex_unlock(&b->dataMutex);
+        // pthread_mutex_unlock(&b->dataMutex);
         return false;
     }
 
     // Если пусто, проверяем флаг смены пола
     if (b->state == nobody) {
         if (b->force_change && b->last_state == s->sex) {
-            pthread_mutex_unlock(&b->dataMutex);
+            // pthread_mutex_unlock(&b->dataMutex);
             return false;
         }
-        pthread_mutex_unlock(&b->dataMutex);
+        // pthread_mutex_unlock(&b->dataMutex);
         return true;
     }
     
     // Разный пол - вход запрещен
     if (b->state != s->sex) {
-        pthread_mutex_unlock(&b->dataMutex);
+        // pthread_mutex_unlock(&b->dataMutex);
         return false;
     }
 
     // Справедливый вход: после max_streak отдаем приоритет другому полу
     if (b->streak >= b->max_streak) {
         if (s->sex == man && b->waiting_women > 0) {
-            pthread_mutex_unlock(&b->dataMutex);
+            // pthread_mutex_unlock(&b->dataMutex);
             return false;
         }
         if (s->sex == woman && b->waiting_men > 0) {
-            pthread_mutex_unlock(&b->dataMutex);
+            // pthread_mutex_unlock(&b->dataMutex);
             return false;
         }
     }
 
-    pthread_mutex_unlock(&b->dataMutex);
+    // pthread_mutex_unlock(&b->dataMutex);
     return true;
 }
 
 // Вход в ванную
 bool enterBathroom(Br *b, St *s) {
-    pthread_mutex_lock(&b->condMutex);
-    
+    // pthread_mutex_lock(&b->condMutex);
+    pthread_mutex_lock(&b->dataMutex);
     // Увеличиваем счетчик ожидающих
     if (s->sex == man) b->waiting_men++;
     else b->waiting_women++;
 
     // Ожидание условия входа (pthread_cond_wait автоматически разблокирует мьютекс)
     while (!canEnter(b,s)) {
-        pthread_cond_wait(&b->cond, &b->condMutex);
+        pthread_cond_wait(&b->cond, &b->dataMutex);
     }
 
     // Уменьшаем счетчик ожидающих
@@ -256,13 +253,13 @@ bool enterBathroom(Br *b, St *s) {
         broadcast_to_clients(msg);
     }
     
-    pthread_mutex_unlock(&b->condMutex);
+    pthread_mutex_unlock(&b->dataMutex);
     return true;
 }
 
 // Выход из ванной
 void leaveBathroom(Br* b, St* s) {
-    pthread_mutex_lock(&b->condMutex);
+    // pthread_mutex_lock(&b->condMutex);
     pthread_mutex_lock(&b->dataMutex);
 
     b->cabins_used--;
@@ -290,10 +287,10 @@ void leaveBathroom(Br* b, St* s) {
     //printf("%s", msg);
     send_to_client(s->client_socket, msg);
 
-    pthread_mutex_unlock(&b->dataMutex);
+    // pthread_mutex_unlock(&b->dataMutex);
     // Сигнализируем всем ожидающим, что место освободилось
     pthread_cond_broadcast(&b->cond);
-    pthread_mutex_unlock(&b->condMutex);
+    pthread_mutex_unlock(&b->dataMutex);
 }
 
 // Функция потока студента
@@ -415,58 +412,53 @@ void run_simulation(int studLen, int client_sock) {
 void* handle_client(void* arg) {
     int client_sock = *(int*)arg;
     free(arg);
-    
+
     char buffer[BUFFER_SIZE];
     char response[BUFFER_SIZE];
-    
-    // ШАГ 1: Отправляем сигнал готовности (согласно заданию)
-    // Сервер -> отправляет сообщение/сигнал о готовности к началу работу
-    snprintf(response, sizeof(response), 
-        "SERVER_READY: Отправьте количество студентов (например: 10)\n");
-    send(client_sock, response, strlen(response), 0);
-    
-    // ШАГ 2: Получаем количество студентов от клиента
-    // Клиент -> обрабатывает сообщение/сигнал от сервера, отправляет сообщение с количеством студентов
-    memset(buffer, 0, BUFFER_SIZE);
-    int recv_len = recv(client_sock, buffer, BUFFER_SIZE - 1, 0);
-    
-    if (recv_len > 0) {
+
+    while (1) {
+
+        // 1. Сигнал готовности
+        snprintf(response, sizeof(response),
+                 "SERVER_READY: Отправьте количество студентов или quit\n");
+        send(client_sock, response, strlen(response), 0);
+
+        // 2. Получение команды
+        memset(buffer, 0, BUFFER_SIZE);
+        int recv_len = recv(client_sock, buffer, BUFFER_SIZE - 1, 0);
+
+        if (recv_len <= 0)
+            break;
+
         buffer[recv_len] = '\0';
-        int studLen = atoi(buffer);
-        
-        if (studLen > 0 && studLen <= 100) {
-            snprintf(response, sizeof(response), 
-                "Принято: %d студентов. Запуск симуляции...\n", studLen);
-            send(client_sock, response, strlen(response), 0);
-            
-            // ШАГ 3: Запускаем потоки студентов
-            // Сервер -> запускает потоки студентов
-            run_simulation(studLen, client_sock);
-            
-            snprintf(response, sizeof(response), "Симуляция завершена. Отключение...\n");
-            send(client_sock, response, strlen(response), 0);
-        } else {
-            snprintf(response, sizeof(response), 
-                "Ошибка: неверное количество студентов (1-100)\n");
-            send(client_sock, response, strlen(response), 0);
-        }
-    }
-    
-    // Закрытие сокета клиента
-    close(client_sock);
-    
-    // Удаление сокета из массива активных клиентов
-    pthread_mutex_lock(&clients_mutex);
-    for (int i = 0; i < MAX_CLIENTS; i++) {
-        if (client_sockets[i] == client_sock) {
-            client_sockets[i] = 0;
-            num_clients--;
+
+        // 3. Проверка на quit
+        if (strncmp(buffer, "quit", 4) == 0 ||
+            strncmp(buffer, "exit", 4) == 0) {
+            send(client_sock, "Отключение...\n", 15, 0);
             break;
         }
+
+        int studLen = atoi(buffer);
+
+        if (studLen > 0 && studLen <= 100) {
+            snprintf(response, sizeof(response),
+                     "Принято: %d студентов. Запуск...\n", studLen);
+            send(client_sock, response, strlen(response), 0);
+
+            run_simulation(studLen, client_sock);
+
+            send(client_sock,
+                 "Симуляция завершена.\n",
+                 22, 0);
+        } else {
+            send(client_sock,
+                 "Ошибка: 1-100\n",
+                 14, 0);
+        }
     }
-    pthread_mutex_unlock(&clients_mutex);
-    
-    printf("Клиент отключен. Активных клиентов: %d\n", num_clients);
+
+    close(client_sock);
     return NULL;
 }
 
@@ -526,7 +518,7 @@ int main() {
     // ШАГ 3: Настройка адреса сервера
     // ============================================
     address.sin_family = AF_INET;           // Семейство адресов IPv4
-    address.sin_addr.s_addr = INADDR_ANY; // Принимать соединения на всех интерфейсах
+    address.sin_addr.s_addr = /*inet_addr("10.111.255.122") */INADDR_ANY; // Принимать соединения на всех интерфейсах
     address.sin_port = htons(PORT);       // Порт (htons - перевод в сетевой порядок байт)
     
     // ============================================

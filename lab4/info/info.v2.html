@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Защита ЛР №4 — Сетевые сокеты на C (TCP)</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #121212;
+            color: #e0e0e0;
+            line-height: 1.6;
+            padding: 30px 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #bb86fc;
+            border-bottom: 3px solid #3700b3;
+            padding-bottom: 10px;
+            margin-bottom: 30px;
+            font-size: 2.5rem;
+        }
+        h2 {
+            color: #bb86fc;
+            margin: 40px 0 20px;
+            border-left: 6px solid #3700b3;
+            padding-left: 15px;
+        }
+        h3 {
+            color: #03dac6;
+            margin: 25px 0 15px;
+            font-size: 1.4rem;
+        }
+        p, li {
+            color: #e0e0e0;
+        }
+        pre {
+            background: #1e1e2f;
+            padding: 15px;
+            border-radius: 8px;
+            overflow-x: auto;
+            border: 1px solid #333;
+            color: #f8f8f2;
+            font-family: 'Courier New', monospace;
+            margin: 15px 0;
+        }
+        code {
+            background: #1e1e2f;
+            color: #ffb86b;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.95em;
+        }
+        .function-block {
+            background: #1e1e2f;
+            border-left: 6px solid #bb86fc;
+            padding: 20px;
+            margin: 25px 0;
+            border-radius: 0 12px 12px 0;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            position: relative;
+        }
+        .function-block h4 {
+            color: #03dac6;
+            font-size: 1.3rem;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        .badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .badge-server {
+            background: #3700b3;
+            color: white;
+        }
+        .badge-client {
+            background: #03dac6;
+            color: black;
+        }
+        .badge-both {
+            background: #bb86fc;
+            color: black;
+        }
+        .param-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+        }
+        .param-table th {
+            background: #3700b3;
+            color: white;
+            padding: 10px;
+            text-align: left;
+        }
+        .param-table td {
+            background: #2d2d3a;
+            padding: 10px;
+            border: 1px solid #444;
+        }
+        .param-table tr:hover td {
+            background: #3a3a4a;
+        }
+        .note {
+            background: #1e3a5f;
+            border-left: 6px solid #bb86fc;
+            padding: 15px 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+        }
+        .warning {
+            background: #4a3b1e;
+            border-left: 6px solid #cf6679;
+            padding: 15px 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+        }
+        .question-item {
+            background: #2d2d3a;
+            border-left: 6px solid #bb86fc;
+            margin: 20px 0;
+            padding: 15px 20px;
+            border-radius: 8px;
+        }
+        .question {
+            color: #bb86fc;
+            font-size: 1.2em;
+            margin-bottom: 10px;
+        }
+        .answer {
+            color: #e0e0e0;
+        }
+        hr {
+            border: 1px solid #333;
+            margin: 40px 0;
+        }
+        ul {
+            margin-left: 25px;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>Лабораторная работа №4 — Защита</h1>
+    <p style="font-size:1.2rem; color:#ccc;">Сетевые сокеты на C (TCP, многоклиентский сервер с синхронизацией)</p>
+
+    <!-- Общая архитектура -->
+    <section>
+        <h2>1. Общая архитектура</h2>
+        <ul>
+            <li>Протокол: <strong>TCP</strong> (<code>SOCK_STREAM</code>)</li>
+            <li>Семейство адресов: <strong>IPv4</strong> (<code>AF_INET</code>)</li>
+            <li>Модель обработки клиентов на сервере: <strong>один поток на клиента</strong> (pthread)</li>
+            <li>Синхронизация доступа к разделяемым данным: <strong>мьютексы + условные переменные</strong></li>
+            <li>Клиент: многопоточное приложение (каждый студент — отдельный поток)</li>
+            <li>Обмен данными: структуры фиксированного размера (<code>msg_t</code>)</li>
+        </ul>
+    </section>
+
+    <!-- Ключевые моменты настройки сервера -->
+    <section>
+        <h2>2. Ключевые моменты настройки сервера</h2>
+
+        <div class="function-block">
+            <h4>
+                setsockopt() + SO_REUSEADDR
+                <span class="badge badge-server">Сервер</span>
+            </h4>
+            <pre>int opt = 1;
+setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));</pre>
+            <p><strong>Назначение:</strong> позволяет повторно использовать локальный порт после закрытия сокета, даже если он находится в состоянии <code>TIME_WAIT</code>.</p>
+            <p><strong>Почему важно:</strong> без этой опции при перезапуске сервера в течение 2-4 минут после остановки возникнет ошибка <code>Address already in use</code>.</p>
+            <p><strong>Детали:</strong></p>
+            <ul>
+                <li>Вызывается <strong>до</strong> <code>bind()</code>.</li>
+                <li>Не отменяет <code>TIME_WAIT</code>, а разрешает новому сокету занять тот же порт.</li>
+                <li>Не защищает от конфликтов двух одновременно работающих серверов.</li>
+            </ul>
+        </div>
+
+        <div class="function-block">
+            <h4>
+                INADDR_ANY
+                <span class="badge badge-server">Сервер</span>
+            </h4>
+            <pre>address.sin_addr.s_addr = INADDR_ANY;</pre>
+            <p>Означает, что сервер принимает соединения на <strong>всех доступных сетевых интерфейсах</strong>. Эквивалент <code>0.0.0.0</code>.</p>
+            <p><strong>Когда используют:</strong> если нужно, чтобы сервер был доступен из любой сети (включая localhost, внутреннюю сеть, внешний IP).</p>
+            <p><strong>Альтернатива:</strong> указать конкретный IP (например, <code>127.0.0.1</code>) — тогда сервер будет слушать только этот интерфейс.</p>
+        </div>
+
+        <div class="function-block">
+            <h4>
+                htons() — порядок байтов
+                <span class="badge badge-both">Общее</span>
+            </h4>
+            <pre>address.sin_port = htons(PORT);</pre>
+            <p><strong>Host TO Network Short</strong> — преобразует 16-битное значение из порядка байтов хоста (little‑endian на x86) в сетевой порядок (big‑endian), обязательный для всех протоколов TCP/IP.</p>
+            <p><strong>Аналоги:</strong> <code>htonl()</code> (32 бита), <code>ntohs()</code>, <code>ntohl()</code> для обратного преобразования.</p>
+            <p><strong>Что будет без htons?</strong> Порт будет интерпретирован неверно на другой архитектуре, соединение не установится.</p>
+        </div>
+    </section>
+
+    <!-- Функции сокетов -->
+    <section>
+        <h2>3. Функции для работы с сокетами (TCP)</h2>
+
+        <div class="function-block">
+            <h4>
+                socket()
+                <span class="badge badge-both">Общее</span>
+            </h4>
+            <pre>int socket(int domain, int type, int protocol);</pre>
+            <table class="param-table">
+                <tr><th>Параметр</th><th>Значение</th></tr>
+                <tr><td>domain</td><td>AF_INET — IPv4</td></tr>
+                <tr><td>type</td><td>SOCK_STREAM — потоковый сокет (TCP)</td></tr>
+                <tr><td>protocol</td><td>0 — выбор протокола по умолчанию (TCP)</td></tr>
+            </table>
+            <p><strong>Возвращает:</strong> файловый дескриптор нового сокета или -1 при ошибке.</p>
+            <p><strong>Примечание:</strong> после успешного создания сокет не привязан к адресу.</p>
+            <p><span class="badge badge-server">Сервер</span> Используется для создания слушающего сокета.</p>
+            <p><span class="badge badge-client">Клиент</span> Используется для создания сокета для подключения к серверу.</p>
+        </div>
+
+        <div class="function-block">
+            <h4>
+                bind()
+                <span class="badge badge-server">Сервер</span>
+            </h4>
+            <pre>int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen);</pre>
+            <table class="param-table">
+                <tr><th>Параметр</th><th>Описание</th></tr>
+                <tr><td>sockfd</td><td>дескриптор сокета (от socket)</td></tr>
+                <tr><td>addr</td><td>указатель на структуру с адресом (например, <code>struct sockaddr_in</code>)</td></tr>
+                <tr><td>addrlen</td><td>размер структуры адреса</td></tr>
+            </table>
+            <p><strong>Назначение:</strong> привязывает сокет к локальному IP-адресу и порту.</p>
+            <p><strong>Возвращает:</strong> 0 при успехе, -1 при ошибке.</p>
+            <p><strong>Особенности:</strong> если порт уже используется другим процессом (и нет <code>SO_REUSEADDR</code>), bind завершится ошибкой.</p>
+        </div>
+
+        <div class="function-block">
+            <h4>
+                listen()
+                <span class="badge badge-server">Сервер</span>
+            </h4>
+            <pre>int listen(int sockfd, int backlog);</pre>
+            <table class="param-table">
+                <tr><th>Параметр</th><th>Описание</th></tr>
+                <tr><td>sockfd</td><td>дескриптор сокета (привязанного к адресу)</td></tr>
+                <tr><td>backlog</td><td>максимальная длина очереди входящих соединений</td></tr>
+            </table>
+            <p><strong>Назначение:</strong> переводит сокет в пассивный режим ожидания подключений.</p>
+            <p><strong>Возвращает:</strong> 0 при успехе, -1 при ошибке.</p>
+            <p><strong>Важно:</strong> backlog — это размер очереди ещё не принятых соединений, а не максимальное число клиентов.</p>
+        </div>
+
+        <div class="function-block">
+            <h4>
+                accept()
+                <span class="badge badge-server">Сервер</span>
+            </h4>
+            <pre>int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen);</pre>
+            <table class="param-table">
+                <tr><th>Параметр</th><th>Описание</th></tr>
+                <tr><td>sockfd</td><td>дескриптор слушающего сокета (после listen)</td></tr>
+                <tr><td>addr</td><td>указатель на структуру для заполнения адреса клиента (может быть NULL)</td></tr>
+                <tr><td>addrlen</td><td>указатель на размер структуры адреса (должен быть инициализирован)</td></tr>
+            </table>
+            <p><strong>Назначение:</strong> извлекает первое соединение из очереди и создаёт <strong>новый</strong> сокет для общения с клиентом.</p>
+            <p><strong>Возвращает:</strong> дескриптор нового сокета (для данного клиента) или -1 при ошибке.</p>
+            <p><strong>Блокировка:</strong> accept блокируется, пока нет ожидающих соединений.</p>
+        </div>
+
+        <div class="function-block">
+            <h4>
+                connect()
+                <span class="badge badge-client">Клиент</span>
+            </h4>
+            <pre>int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen);</pre>
+            <p><strong>Используется в клиенте.</strong></p>
+            <table class="param-table">
+                <tr><th>Параметр</th><th>Описание</th></tr>
+                <tr><td>sockfd</td><td>дескриптор сокета клиента</td></tr>
+                <tr><td>addr</td><td>адрес сервера (IP и порт)</td></tr>
+                <tr><td>addrlen</td><td>размер структуры адреса</td></tr>
+            </table>
+            <p><strong>Назначение:</strong> устанавливает соединение с сервером.</p>
+            <p><strong>Возвращает:</strong> 0 при успехе, -1 при ошибке.</p>
+        </div>
+
+        <div class="function-block">
+            <h4>
+                send()
+                <span class="badge badge-both">Общее</span>
+            </h4>
+            <pre>ssize_t send(int sockfd, const void *buf, size_t len, int flags);</pre>
+            <table class="param-table">
+                <tr><th>Параметр</th><th>Описание</th></tr>
+                <tr><td>sockfd</td><td>дескриптор сокета</td></tr>
+                <tr><td>buf</td><td>указатель на буфер с данными</td></tr>
+                <tr><td>len</td><td>количество байт для отправки</td></tr>
+                <tr><td>flags</td><td>флаги (обычно 0)</td></tr>
+            </table>
+            <p><strong>Назначение:</strong> передаёт данные через сокет.</p>
+            <p><strong>Возвращает:</strong> количество отправленных байт (может быть меньше len) или -1 при ошибке.</p>
+            <p><strong>Примечание:</strong> для гарантированной отправки всего буфера нужно вызывать в цикле.</p>
+            <p><span class="badge badge-server">Сервер</span> отправляет обновления состояния.</p>
+            <p><span class="badge badge-client">Клиент</span> отправляет запросы (JOIN, LEAVE, STATS).</p>
+        </div>
+
+        <div class="function-block">
+            <h4>
+                recv()
+                <span class="badge badge-both">Общее</span>
+            </h4>
+            <pre>ssize_t recv(int sockfd, void *buf, size_t len, int flags);</pre>
+            <table class="param-table">
+                <tr><th>Параметр</th><th>Описание</th></tr>
+                <tr><td>sockfd</td><td>дескриптор сокета</td></tr>
+                <tr><td>buf</td><td>указатель на буфер для приёма данных</td></tr>
+                <tr><td>len</td><td>размер буфера</td></tr>
+                <tr><td>flags</td><td>флаги (обычно 0)</td></tr>
+            </table>
+            <p><strong>Назначение:</strong> принимает данные из сокета.</p>
+            <p><strong>Возвращает:</strong></p>
+            <ul>
+                <li>>0 — количество принятых байт</li>
+                <li>0 — удалённая сторона закрыла соединение</li>
+                <li>-1 — ошибка</li>
+            </ul>
+            <p><span class="badge badge-server">Сервер</span> принимает запросы от клиентов.</p>
+            <p><span class="badge badge-client">Клиент</span> принимает обновления состояния от сервера.</p>
+        </div>
+
+        <div class="function-block">
+            <h4>
+                close()
+                <span class="badge badge-both">Общее</span>
+            </h4>
+            <pre>int close(int fd);</pre>
+            <p><strong>Назначение:</strong> закрывает файловый дескриптор сокета. При этом TCP‑соединение завершается (переходит в состояние FIN‑WAIT/TIME‑WAIT).</p>
+            <p><strong>Возвращает:</strong> 0 при успехе, -1 при ошибке.</p>
+            <p><span class="badge badge-server">Сервер</span> закрывает клиентский сокет после обработки.</p>
+            <p><span class="badge badge-client">Клиент</span> закрывает сокет после завершения сеанса.</p>
+        </div>
+    </section>
+
+    <!-- Функции для работы с адресами -->
+    <section>
+        <h2>4. Вспомогательные функции для адресации</h2>
+
+        <div class="function-block">
+            <h4>
+                inet_ntop()
+                <span class="badge badge-server">Сервер</span>
+            </h4>
+            <pre>const char *inet_ntop(int af, const void *src, char *dst, socklen_t size);</pre>
+            <p><strong>Назначение:</strong> преобразует бинарный IP-адрес (например, из <code>sin_addr</code>) в строку.</p>
+            <table class="param-table">
+                <tr><th>Параметр</th><th>Описание</th></tr>
+                <tr><td>af</td><td>AF_INET для IPv4</td></tr>
+                <tr><td>src</td><td>указатель на структуру с адресом (например, <code>&addr.sin_addr</code>)</td></tr>
+                <tr><td>dst</td><td>буфер для строки (например, <code>char ip[INET_ADDRSTRLEN]</code>)</td></tr>
+                <tr><td>size</td><td>размер буфера</td></tr>
+            </table>
+            <p><strong>Возвращает:</strong> указатель на dst или NULL при ошибке.</p>
+        </div>
+
+        <div class="function-block">
+            <h4>
+                getpeername()
+                <span class="badge badge-server">Сервер</span>
+            </h4>
+            <pre>int getpeername(int sockfd, struct sockaddr *addr, socklen_t *addrlen);</pre>
+            <p><strong>Назначение:</strong> получает адрес удалённой стороны, подключённой к сокету.</p>
+            <p><strong>Возвращает:</strong> 0 при успехе, -1 при ошибке.</p>
+        </div>
+    </section>
+
+    <!-- Функции для работы с потоками и синхронизацией -->
+    <section>
+        <h2>5. Функции для работы с потоками (pthread)</h2>
+
+        <div class="function-block">
+            <h4>
+                pthread_create()
+                <span class="badge badge-both">Общее</span>
+            </h4>
+            <pre>int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+                   void *(*start_routine)(void *), void *arg);</pre>
+            <p><strong>Назначение:</strong> создаёт новый поток, который выполняет функцию <code>start_routine</code> с аргументом <code>arg</code>.</p>
+            <p><strong>Возвращает:</strong> 0 при успехе, код ошибки при неудаче.</p>
+            <p><span class="badge badge-server">Сервер</span> создаёт поток для каждого подключившегося клиента.</p>
+            <p><span class="badge badge-client">Клиент</span> создаёт потоки-студенты.</p>
+        </div>
+
+        <div class="function-block">
+            <h4>
+                pthread_detach()
+                <span class="badge badge-server">Сервер</span>
+            </h4>
+            <pre>int pthread_detach(pthread_t thread);</pre>
+            <p><strong>Назначение:</strong> переводит поток в отсоединённое состояние — после завершения его ресурсы будут освобождены автоматически.</p>
+            <p><strong>Использование:</strong> чтобы не хранить идентификаторы потоков и не вызывать <code>pthread_join</code>.</p>
+        </div>
+
+        <div class="function-block">
+            <h4>
+                pthread_join()
+                <span class="badge badge-client">Клиент</span>
+            </h4>
+            <pre>int pthread_join(pthread_t thread, void **retval);</pre>
+            <p><strong>Назначение:</strong> ожидает завершения указанного потока.</p>
+            <p><strong>Использование в клиенте:</strong> главный поток ожидает завершения всех студентов.</p>
+        </div>
+
+        <div class="function-block">
+            <h4>
+                pthread_mutex_init / lock / unlock / destroy
+                <span class="badge badge-both">Общее</span>
+            </h4>
+            <pre>int pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr);
+int pthread_mutex_lock(pthread_mutex_t *mutex);
+int pthread_mutex_unlock(pthread_mutex_t *mutex);
+int pthread_mutex_destroy(pthread_mutex_t *mutex);</pre>
+            <p><strong>Назначение:</strong> управление мьютексами для защиты критических секций.</p>
+            <p><strong>Особенность:</strong> все функции возвращают 0 при успехе или код ошибки.</p>
+            <p><span class="badge badge-server">Сервер</span> защищает общее состояние ванной.</p>
+            <p><span class="badge badge-client">Клиент</span> используется для синхронизации вывода в консоль.</p>
+        </div>
+
+        <div class="function-block">
+            <h4>
+                pthread_cond_init / wait / broadcast / destroy
+                <span class="badge badge-server">Сервер</span>
+            </h4>
+            <pre>int pthread_cond_init(pthread_cond_t *cond, const pthread_condattr_t *attr);
+int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex);
+int pthread_cond_broadcast(pthread_cond_t *cond);
+int pthread_cond_destroy(pthread_cond_t *cond);</pre>
+            <p><strong>Назначение:</strong> условные переменные для организации ожидания выполнения некоторого условия.</p>
+            <p><strong>pthread_cond_wait:</strong> атомарно разблокирует мьютекс и переводит поток в сон до получения сигнала. После пробуждения мьютекс снова захватывается. <strong>Всегда вызывается в цикле while(!condition)</strong> из-за возможных ложных пробуждений.</p>
+            <p><strong>pthread_cond_broadcast:</strong> будит все потоки, ожидающие на данной условной переменной.</p>
+        </div>
+    </section>
+
+    <!-- Вспомогательные функции -->
+    <section>
+        <h2>6. Вспомогательные функции (время, случайные числа, файлы)</h2>
+
+        <div class="function-block">
+            <h4>
+                time()
+                <span class="badge badge-both">Общее</span>
+            </h4>
+            <pre>time_t time(time_t *tloc);</pre>
+            <p><strong>Назначение:</strong> возвращает текущее календарное время в секундах с 1970-01-01.</p>
+            <p>Используется для замера времени ожидания (<code>wait_start</code>).</p>
+            <p><span class="badge badge-server">Сервер</span> может использовать для статистики.</p>
+            <p><span class="badge badge-client">Клиент</span> фиксирует время отправки запроса.</p>
+        </div>
+
+        <div class="function-block">
+            <h4>
+                sleep() / usleep()
+                <span class="badge badge-client">Клиент</span>
+            </h4>
+            <pre>unsigned int sleep(unsigned int seconds);
+int usleep(useconds_t usec);</pre>
+            <p><strong>sleep</strong> — приостанавливает выполнение потока на заданное число секунд (имитация пребывания в ванной).<br>
+            <strong>usleep</strong> — на микросекунды (используется для создания интервала между запусками потоков).</p>
+        </div>
+
+        <div class="function-block">
+            <h4>
+                rand() / srand()
+                <span class="badge badge-client">Клиент</span>
+            </h4>
+            <pre>int rand(void);
+void srand(unsigned int seed);</pre>
+            <p><strong>Назначение:</strong> генерация псевдослучайных чисел для определения пола и времени в душе. <code>srand(time(NULL))</code> инициализирует генератор.</p>
+        </div>
+
+        <div class="function-block">
+            <h4>
+                fopen() / fscanf() / fclose()
+                <span class="badge badge-client">Клиент</span>
+            </h4>
+            <pre>FILE *fopen(const char *path, const char *mode);
+int fscanf(FILE *stream, const char *format, ...);
+int fclose(FILE *stream);</pre>
+            <p><strong>Назначение:</strong> чтение конфигурации (IP-адреса сервера) из файла <code>config.txt</code>.</p>
+        </div>
+    </section>
+
+    <!-- Протокол обмена -->
+    <section>
+        <h2>7. Протокол взаимодействия (структура msg_t)</h2>
+        <pre>typedef struct {
+    msg_type_t type;        // MSG_JOIN, MSG_LEAVE, MSG_UPDATE, MSG_STATS
+    int id;                 // идентификатор студента
+    int gender;             // 0=MALE, 1=FEMALE
+    long wait_start;        // время отправки запроса на вход
+    long bath_time;         // время в ванной (при выходе)
+    int occupied;           // занято мест
+    int capacity;           // всего мест
+    int streak_gender;      // пол текущей серии (-1 если не определён)
+    int streak_used;        // сколько вошло подряд
+    int remaining_male;     // осталось мужчин (не зашедших)
+    int remaining_female;   // осталось женщин
+    long total_wait_time;   // суммарное время ожидания
+    long total_bath_time;   // суммарное время в ванной
+    int entered_count;      // сколько всего вошло
+    int male_entered;       // из них мужчин
+    int female_entered;     // женщин
+} msg_t;</pre>
+        <p>Сообщения фиксированного размера передаются через <code>send</code>/<code>recv</code>.</p>
+    </section>
+
+    <!-- Вопросы и ответы -->
+    <section>
+        <h2>8. Возможные вопросы преподавателя</h2>
+
+        <div class="question-item">
+            <div class="question">❓ Почему нужен setsockopt с SO_REUSEADDR?</div>
+            <div class="answer">Чтобы избежать ошибки "Address already in use" после перезапуска сервера, когда порт находится в состоянии TIME_WAIT.</div>
+        </div>
+
+        <div class="question-item">
+            <div class="question">❓ Что такое INADDR_ANY?</div>
+            <div class="answer">Это 0.0.0.0 — сервер слушает на всех сетевых интерфейсах.</div>
+        </div>
+
+        <div class="question-item">
+            <div class="question">❓ Что будет, если не вызвать htons?</div>
+            <div class="answer">Порт будет интерпретирован в порядке байтов хоста (little-endian), что не соответствует сетевому стандарту (big-endian). Соединение может не установиться.</div>
+        </div>
+
+        <div class="question-item">
+            <div class="question">❓ Что возвращает recv при отключении клиента?</div>
+            <div class="answer">0.</div>
+        </div>
+
+        <div class="question-item">
+            <div class="question">❓ Почему используется TCP, а не UDP?</div>
+            <div class="answer">Требуется надёжная доставка и сохранение порядка сообщений; состояние соединения важно.</div>
+        </div>
+
+        <div class="question-item">
+            <div class="question">❓ Почему в pthread_cond_wait используют цикл while, а не if?</div>
+            <div class="answer">Из-за ложных пробуждений (spurious wakeups) и возможности изменения условия несколькими потоками. Проверка в цикле гарантирует, что условие действительно выполнено.</div>
+        </div>
+
+        <div class="question-item">
+            <div class="question">❓ Может ли возникнуть взаимная блокировка (deadlock)?</div>
+            <div class="answer">В данной реализации используется один мьютекс, защищающий все общие данные. Нет вложенных блокировок, поэтому deadlock исключён.</div>
+        </div>
+
+        <div class="question-item">
+            <div class="question">❓ Что произойдёт при SIGPIPE во время send?</div>
+            <div class="answer">Если клиент разорвал соединение, send может вызвать сигнал SIGPIPE, который по умолчанию завершает процесс. Нужно либо обработать сигнал, либо использовать флаг MSG_NOSIGNAL.</div>
+        </div>
+    </section>
+
+    <!-- Подводные камни -->
+    <section>
+        <h2>9. Подводные камни реализации</h2>
+        <ul>
+            <li><strong>Отсутствие SO_REUSEADDR</strong> — ошибка при перезапуске сервера.</li>
+            <li><strong>Блокирующий accept</strong> — сервер не может завершиться, пока нет подключений.</li>
+            <li><strong>recv может вернуть меньше данных, чем ожидалось</strong> — требуется циклический приём.</li>
+            <li><strong>Необработанный SIGPIPE</strong> — аварийное завершение при send в закрытый сокет.</li>
+            <li><strong>Игнорирование возвращаемых значений</strong> — пропуск ошибок.</li>
+            <li><strong>Потеря сигнала условной переменной</strong> — если не проверить условие до wait.</li>
+            <li><strong>Утечка памяти</strong> — нужно освобождать аргумент, переданный в поток (int *fd_ptr).</li>
+        </ul>
+    </section>
+
+    <!-- Улучшения архитектуры -->
+    <section>
+        <h2>10. Возможные улучшения</h2>
+        <ul>
+            <li>Использование <code>select</code> / <code>poll</code> / <code>epoll</code> для одного потока на много клиентов.</li>
+            <li>Пул потоков вместо создания потока на каждого клиента.</li>
+            <li>Graceful shutdown (обработка SIGINT, завершение всех потоков).</li>
+            <li>Таймауты на чтение/запись (через <code>setsockopt</code> или <code>alarm</code>).</li>
+            <li>Верификация целостности сообщений (например, добавить длину).</li>
+        </ul>
+    </section>
+
+    <hr>
+    <p style="text-align:center; color:#aaa;">Подготовлено для защиты лабораторной работы №4</p>
+</div>
+</body>
+</html>
