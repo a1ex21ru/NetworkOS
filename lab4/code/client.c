@@ -58,8 +58,11 @@ static int connect_server(const char* ip) {
     sa.sin_addr.s_addr = inet_addr(ip);
     for (int p = PORT; p <= PORT_MAX; p++) {
         sa.sin_port = htons(p);
-        if (connect(sock, (struct sockaddr*)&sa, sizeof(sa)) == 0)
+        if (connect(sock, (struct sockaddr*)&sa, sizeof(sa)) == 0) {
+            printf("  [client] Подключение к %s:%d (fd=%d) успешно\n", ip, p, sock);
+            fflush(stdout);
             return 0;
+        }
         close(sock);
         sock = socket(AF_INET, SOCK_STREAM, 0);
         if (sock < 0) { perror("socket"); return -1; }
@@ -73,6 +76,9 @@ static int req_enter(int g, int id) {
     int buf[4] = {CMD_ENTER, g, id, 0}, r;
     if (send_all(sock, buf, sizeof(buf)) < 0 || recv_all(sock, &r, sizeof(r)) < 0)
         return RESP_DENIED;
+    printf("  [client] Ответ на ENTER для %d (%s): %s\n",
+           id, g == MALE ? "M" : "F", r == RESP_OK ? "OK" : "DENIED");
+    fflush(stdout);
     return r;
 }
 
@@ -80,10 +86,14 @@ static void req_exit(int g, int id) {
     int buf[4] = {CMD_EXIT, g, id, 0}, r;
     send_all(sock, buf, sizeof(buf));
     recv_all(sock, &r, sizeof(r));
+    printf("  [client] EXIT отправлен для %d (%s)\n", id, g == MALE ? "M" : "F");
+    fflush(stdout);
 }
 
 static void student_run(int id, int g, const char* ip) {
     char s = (g == MALE) ? 'M' : 'F';
+    printf("[student %d %c] старт\n", id, s);
+    fflush(stdout);
     if (connect_server(ip) < 0) {
         printf("[%d %c] Ошибка подключения\n", id, s);
         return;
@@ -91,10 +101,18 @@ static void student_run(int id, int g, const char* ip) {
     int r = req_enter(g, id);
     if (r == RESP_OK) {
         useconds_t us = SHOWER_MIN + (rand() % (SHOWER_MAX - SHOWER_MIN));
+        printf("  [student %d %c] вошёл, душ %.2f сек\n",
+               id, s, us / 1000000.0);
+        fflush(stdout);
         usleep(us);
         req_exit(g, id);
+    } else {
+        printf("  [student %d %c] вход отклонён сервером\n", id, s);
+        fflush(stdout);
     }
     close(sock);
+    printf("[student %d %c] завершён\n", id, s);
+    fflush(stdout);
 }
 
 int main(int argc, char* argv[]) {
@@ -109,6 +127,8 @@ int main(int argc, char* argv[]) {
         if (argc == 2 && strcmp(argv[1], "--multi") == 0) ip = SERVER_IP;
         srand((unsigned)time(NULL) ^ getpid());
         pid_t* pids = malloc((size_t)n * sizeof(pid_t));
+        printf("[main] Запуск %d студентов (по умолчанию), сервер %s:%d\n", n, ip, PORT);
+        fflush(stdout);
         for (int i = 0; i < n; i++) {
             int g = (rand() / (double)RAND_MAX < ratio) ? MALE : FEMALE;
             if (fork() == 0) {
@@ -119,6 +139,8 @@ int main(int argc, char* argv[]) {
             usleep(50000);
         }
         for (int i = 0; i < n; i++) waitpid(pids[i], NULL, 0);
+        printf("[main] Все %d студентов завершили работу. Итоговую статистику см. в окне сервера.\n", n);
+        fflush(stdout);
         free(pids);
         return 0;
     }
@@ -129,6 +151,9 @@ int main(int argc, char* argv[]) {
         double ratio = argc >= 5 ? atoi(argv[4]) / 100.0 : 0.5;
         srand((unsigned)time(NULL) ^ getpid());
         pid_t* pids = malloc((size_t)n * sizeof(pid_t));
+        printf("[main] Запуск %d студентов (--multi, мужчин ~%.0f%%), сервер %s:%d\n",
+               n, ratio * 100.0, ip, PORT);
+        fflush(stdout);
         for (int i = 0; i < n; i++) {
             int g = (rand() / (double)RAND_MAX < ratio) ? MALE : FEMALE;
             if (fork() == 0) {

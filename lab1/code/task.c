@@ -181,7 +181,8 @@ void bathroomDay(int student_count, double male_ratio, unsigned int capacity,
     if (entered > 0)
         printf(" Среднее время ожидания: %.2f сек\n", total_wait / entered);
     printf("======================================================================\n\n");
-    
+    fflush(stdout);
+
     free(students);
     free(threads);
     pthread_mutex_destroy(&shared_bathroom.access_lock);
