@@ -10,9 +10,12 @@
 #include <arpa/inet.h>
 #include <time.h>
 #include <signal.h>
+#include <errno.h>
 
 #define PORT        4567
 #define PORT_MAX    4587
+#define LOG_CONN_FIRST  20   /* первые N подключений логируем полностью */
+#define LOG_CONN_STEP   10   /* дальше — каждое N-е */
 #define CMD_CHECK   1
 #define CMD_ENTER   2
 #define CMD_EXIT    3
@@ -36,18 +39,15 @@ typedef struct {
 } Bathroom;
 
 static Bathroom B;
-static int listen_fd;
+static volatile int listen_fd;
 static volatile bool running = true;
+static int next_conn_id = 0;
+static pthread_mutex_t conn_mtx = PTHREAD_MUTEX_INITIALIZER;
 
-static void handle_signal(int sig) {
-    (void)sig;
-    running = false;
-    if (listen_fd >= 0) {
-        close(listen_fd);
-    }
-    pthread_mutex_lock(&B.mtx);
-    pthread_cond_broadcast(&B.cond);
-    pthread_mutex_unlock(&B.mtx);
+typedef struct { int conn_id; int fd; } client_ctx_t;
+
+static int should_log_conn(int conn_id) {
+    return conn_id <= LOG_CONN_FIRST || conn_id % LOG_CONN_STEP == 0;
 }
 
 static void print_server_stats(void) {
@@ -104,7 +104,7 @@ static bool canEnter(int g) {
     return false;
 }
 
-static int enterBathroom(int g, int cid) {
+static int enterBathroom(int g, int cid, int conn_id) {
     pthread_mutex_lock(&B.mtx);
     time_t t0 = time(NULL);
     if (g == MALE) B.wait_m++; else B.wait_f++;
@@ -140,15 +140,15 @@ static int enterBathroom(int g, int cid) {
     if (B.consecutive >= B.max_consec)
         B.forced_switch = true;
     int t = (int)(time(NULL) - B.start);
-    printf("[ВХОД %3d] Клиент %d (%s) вошёл. %d/%d | Входы %d/%d | Ожидают M=%d F=%d%s\n",
-           t, cid, g == MALE ? "M" : "F", B.occupied, B.total, B.consecutive, B.max_consec,
+    printf("[ВХОД %3d] #%d студент %d (%s) вошёл. %d/%d | Входы %d/%d | Ожидают M=%d F=%d%s\n",
+           t, conn_id, cid, g == MALE ? "M" : "F", B.occupied, B.total, B.consecutive, B.max_consec,
            B.wait_m, B.wait_f, B.forced_switch ? " СМЕНА!" : "");
     fflush(stdout);
     pthread_mutex_unlock(&B.mtx);
     return RESP_OK;
 }
 
-static void exitBathroom(int g, int cid) {
+static void exitBathroom(int g, int cid, int conn_id) {
     pthread_mutex_lock(&B.mtx);
     B.occupied--;
     B.last_gender = g;
@@ -159,22 +159,25 @@ static void exitBathroom(int g, int cid) {
         B.gender = 0;
     }
     int t = (int)(time(NULL) - B.start);
-    printf("[ВЫХОД%3d] Клиент %d (%s) вышел. %d/%d\n", t, cid, g == MALE ? "M" : "F", B.occupied, B.total);
+    printf("[ВЫХОД%3d] #%d студент %d (%s) вышел. %d/%d\n", t, conn_id, cid, g == MALE ? "M" : "F", B.occupied, B.total);
     fflush(stdout);
     pthread_cond_broadcast(&B.cond);
     pthread_mutex_unlock(&B.mtx);
 }
 
-static void log_client_disconnect(int fd) {
-    printf("Клиент отключился (fd=%d)\n", fd);
+static void log_client_disconnect(int conn_id, int fd) {
+    if (should_log_conn(conn_id))
+        printf("Клиент #%d отключился (fd=%d)\n", conn_id, fd);
     fflush(stdout);
 }
 
 static void* handle_client(void* arg) {
-    int fd = *(int*)arg;
-    free(arg);
+    client_ctx_t* ctx = (client_ctx_t*)arg;
+    int conn_id = ctx->conn_id, fd = ctx->fd;
+    free(ctx);
     int buf[4], resp[4];
-    printf("Начата обработка клиента (fd=%d)\n", fd);
+    if (should_log_conn(conn_id))
+        printf("Обработка клиента #%d (fd=%d) начата\n", conn_id, fd);
     fflush(stdout);
     while (running && recv_all(fd, buf, sizeof(buf)) == 0) {
         int cmd = buf[0], g = buf[1], cid = buf[2];
@@ -186,10 +189,10 @@ static void* handle_client(void* arg) {
                 pthread_mutex_unlock(&B.mtx);
                 break;
             case CMD_ENTER:
-                resp[0] = enterBathroom(g, cid);
+                resp[0] = enterBathroom(g, cid, conn_id);
                 break;
             case CMD_EXIT:
-                exitBathroom(g, cid);
+                exitBathroom(g, cid, conn_id);
                 resp[0] = RESP_OK;
                 break;
             case CMD_STATUS:
@@ -206,7 +209,7 @@ static void* handle_client(void* arg) {
         if (send_all(fd, resp, rlen) < 0) break;
     }
     close(fd);
-    log_client_disconnect(fd);
+    log_client_disconnect(conn_id, fd);
     return NULL;
 }
 
@@ -220,19 +223,24 @@ static void* acceptor(void* arg) {
             if (!running) break;
             continue;
         }
-        /* Лог подключения клиента c IP-адресом */
         char ipstr[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &addr.sin_addr, ipstr, sizeof(ipstr));
-        printf("Клиент подключился с IP: %s\n", ipstr);
+        int conn_id;
+        pthread_mutex_lock(&conn_mtx);
+        conn_id = ++next_conn_id;
+        pthread_mutex_unlock(&conn_mtx);
+        if (should_log_conn(conn_id))
+            printf("Клиент #%d подключился (fd=%d, IP: %s)\n", conn_id, fd, ipstr);
         fflush(stdout);
-        int* p = malloc(sizeof(int));
-        if (!p) { close(fd); continue; }
-        *p = fd;
+        client_ctx_t* ctx = malloc(sizeof(client_ctx_t));
+        if (!ctx) { close(fd); continue; }
+        ctx->conn_id = conn_id;
+        ctx->fd = fd;
         pthread_t t;
-        if (pthread_create(&t, NULL, handle_client, p) == 0)
+        if (pthread_create(&t, NULL, handle_client, ctx) == 0)
             pthread_detach(t);
         else
-            free(p), close(fd);
+            free(ctx), close(fd);
     }
     return NULL;
 }
@@ -253,8 +261,12 @@ int main(void) {
     B.total_wait_time = 0.0;
     B.start = time(NULL);
 
-    signal(SIGINT, handle_signal);
-    signal(SIGTERM, handle_signal);
+    /* Блокируем SIGINT/SIGTERM в процессе; главный поток будет ждать их через sigtimedwait */
+    sigset_t sigset;
+    sigemptyset(&sigset);
+    sigaddset(&sigset, SIGINT);
+    sigaddset(&sigset, SIGTERM);
+    sigprocmask(SIG_BLOCK, &sigset, NULL);
 
     listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) { perror("socket"); return 1; }
@@ -276,22 +288,24 @@ int main(void) {
         close(listen_fd);
         return 1;
     }
-    printf("Сервер: %s:%d, кабинок %d, макс входов %d\n", ip, port, cabins, maxc);
+    printf("Сервер: %s:%d, кабинок %d, макс входов %d (Ctrl+C — выход)\n", ip, port, cabins, maxc);
     pthread_t t;
     pthread_create(&t, NULL, acceptor, NULL);
 
-    /* Основной поток ждёт сигнал завершения; раз в 10 сек выводим статистику */
-    int sec = 0;
+    /* Главный поток ждёт SIGINT/SIGTERM через sigtimedwait; раз в 30 сек — статистика */
     while (running) {
-        sleep(1);
-        if (++sec >= 10) {
-            sec = 0;
+        struct timespec ts = { 30, 0 };
+        int r = sigtimedwait(&sigset, NULL, &ts);
+        if (r > 0) {
+            running = false;
+            if (listen_fd >= 0) {
+                close(listen_fd);
+                listen_fd = -1;
+            }
+        } else if (r < 0 && errno == EAGAIN)
             print_server_stats();
-        }
     }
 
-    /* Останавливаем приём подключений и ждём завершения acceptor-потока */
-    close(listen_fd);
     pthread_join(t, NULL);
 
     printf("\n======================================================================\n");
